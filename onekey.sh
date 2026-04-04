@@ -117,7 +117,7 @@ update_system() {
 # 增加快捷命令 s 设置（如果没有的话）
 if ! grep -q "alias s=" ~/.bashrc; then
     echo "正在为 s 设置快捷命令..."
-    echo "alias s='bash <(curl -sL https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh)'" >> ~/.bashrc
+    echo "alias s='bash <(curl -sL https://raw.githubusercontent.com/sinian-liu/onekey/main/onekey.sh)'" >> ~/.bashrc
     source ~/.bashrc
     echo "快捷命令 s 已设置。"
 else
@@ -125,6 +125,1087 @@ else
 fi
 
 # 主菜单函数
+# ===== DD重装系统函数 =====
+
+# 颜色定义
+GREEN="\033[32m"
+RED="\033[31m"
+YELLOW="\033[33m"
+RESET="\033[0m"
+
+dd_check_system() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        case $ID in
+            ubuntu|debian) SYSTEM="debian" ;;
+            centos|rhel) SYSTEM="centos" ;;
+            fedora) SYSTEM="fedora" ;;
+            arch) SYSTEM="arch" ;;
+            *) SYSTEM="unknown" ;;
+        esac
+    elif [ -f /etc/redhat-release ]; then
+        SYSTEM="centos"
+    elif [ -f /etc/fedora-release ]; then
+        SYSTEM="fedora"
+    else
+        SYSTEM="unknown"
+    fi
+}
+
+dd_command_exists() { command -v "$1" &> /dev/null; }
+
+dd_get_server_ip() {
+    curl -s4 ifconfig.me 2>/dev/null || curl -s4 api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}'
+}
+
+dd_is_interactive() {
+    if [ -t 0 ] && [ -t 1 ]; then
+        return 0
+    fi
+    return 1
+}
+
+dd_wait_for_enter() { read -p "按回车键返回主菜单..."; }
+
+dd_ask_reboot() {
+    echo ""
+    echo -e "${YELLOW}=============================================${RESET}"
+    echo -e "${YELLOW}系统重装已准备完成！${RESET}"
+    echo -e "${YELLOW}脚本已配置好 GRUB 启动项，等待安装新系统。${RESET}"
+    echo ""
+    echo -e "${YELLOW}建议通过 VNC 查看安装进度。${RESET}"
+    echo -e "${YELLOW}如果长时间未连接，请检查VNC是否正常。${RESET}"
+    echo -e "${YELLOW}=============================================${RESET}"
+    echo ""
+    read -p "是否立即重启开始安装？(y/n，默认 n): " reboot_confirm
+    reboot_confirm=${reboot_confirm:-n}
+    
+    if [[ "$reboot_confirm" =~ ^[Yy]$ ]]; then
+        echo -e "${GREEN}正在重启服务器...${RESET}"
+        sleep 2
+        reboot
+    else
+        echo -e "${YELLOW}已取消重启，请稍后手动执行 reboot 重启${RESET}"
+    fi
+}
+
+# DD 镜像定义
+DD_IMAGES="
+# Windows DD 镜像 (格式: 镜像名|直链|密码)
+Windows 10 Pro x64|https://oss.sunnyo.com/vhd/win10ltsc_x64_vhdx.gz|WWAN123.com
+Windows 11 Pro x64|https://oss.sunnyo.com/vhd/win11_pro_x64_vhdx.gz|WWAN123.com
+Windows Server 2022|https://oss.sunnyo.com/vhd/windows2022_x64_vhdx.gz|WWAN123.com
+"
+
+dd_show_dd_menu() {
+    clear
+    echo -e "${GREEN}=============================================${RESET}"
+    echo -e "${GREEN}     DD 重装系统${RESET}"
+    echo -e "${GREEN}=============================================${RESET}"
+    echo -e "${RED}警告：此操作会清除所有数据！${RESET}"
+    echo ""
+    
+    echo -e "${YELLOW}-------------------- Ubuntu 系列 --------------------${RESET}"
+    printf "%-26s %-26s\n" "1.  Ubuntu 24.04" "2.  Ubuntu 22.04"
+    printf "%-26s %-26s\n" "3.  Ubuntu 20.04" "4.  Ubuntu 18.04"
+    
+    echo -e "${YELLOW}-------------------- Debian 系列 --------------------${RESET}"
+    printf "%-26s %-26s\n" "5.  Debian 13" "6.  Debian 12"
+    printf "%-26s %-26s\n" "7.  Debian 11" "8.  Debian 10"
+    
+    echo -e "${YELLOW}-------------------- CentOS 系列 --------------------${RESET}"
+    printf "%-26s %-26s\n" "9.  CentOS Stream 10" "10. CentOS Stream 9"
+    printf "%-26s %-26s\n" "11. CentOS 8" "12. CentOS 7"
+    
+    echo -e "${YELLOW}------------------- Windows DD 镜像 -------------------${RESET}"
+    printf "%-26s %-26s\n" "13. Windows 10 Pro" "14. Windows 11 Pro"
+    printf "%-26s %-26s\n" "15. Windows 11 ARM" "16. Windows 7"
+    printf "%-26s %-26s\n" "17. Windows Server 2025" "18. Windows Server 2022"
+    printf "%-26s %-26s\n" "19. Windows Server 2019" "20. Windows Server 2016"
+    
+    echo -e "${YELLOW}-------------------- RedHat 系列 --------------------${RESET}"
+    printf "%-26s %-26s\n" "21. Rocky Linux 10" "22. Rocky Linux 9"
+    printf "%-26s %-26s\n" "23. Alma Linux 10" "24. Alma Linux 9"
+    printf "%-26s %-26s\n" "25. Oracle Linux 10" "26. Oracle Linux 9"
+    printf "%-26s %-26s\n" "27. Fedora Linux 43" "28. Fedora Linux 42"
+    
+    echo -e "${YELLOW}------------------- 其他 Linux --------------------${RESET}"
+    printf "%-26s %-26s\n" "29. Alpine Linux 3.23" "30. Alpine Linux 3.22"
+    printf "%-26s %-26s\n" "31. Alpine Linux 3.21" "32. Arch Linux"
+    printf "%-26s %-26s\n" "33. Kali Linux" "34. openSUSE 15.6"
+    printf "%-26s %-26s\n" "35. openSUSE 16.0" "36. openEuler 24.03"
+    
+    echo -e "${YELLOW}------------------- 自定义镜像 --------------------${RESET}"
+    printf "%-26s\n" "37. DD 镜像 (自定义直链)"
+    
+    echo ""
+    echo -e "${YELLOW}=============================================${RESET}"
+    echo -e "${YELLOW}直接回车返回主菜单${RESET}"
+    echo -e "${YELLOW}=============================================${RESET}"
+    echo ""
+}
+
+dd_download_scripts() {
+    echo -e "${GREEN}正在下载脚本...${RESET}"
+    
+    wget -O /tmp/reinstall.sh https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}下载 bin456789/reinstall 失败${RESET}"
+        return 1
+    fi
+    chmod +x /tmp/reinstall.sh
+    
+    wget --no-check-certificate -qO /tmp/InstallNET.sh 'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' 2>/dev/null
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}下载 leitbogioro/Tools 失败${RESET}"
+        return 1
+    fi
+    chmod +x /tmp/InstallNET.sh
+    
+    echo -e "${GREEN}脚本下载完成！${RESET}"
+    return 0
+}
+
+dd_execute_install() {
+    local choice=$1
+    
+    local password
+    local install_cmd=""
+    local is_windows=false
+    local is_custom_dd=false
+    local win_user="administrator"
+    local win_port="3389"
+    local linux_user="root"
+    local linux_port="22"
+    
+dd_generate_random_password() {
+    tr -dc 'A-Za-z0-9!@#$%' < /dev/urandom | head -c 16
+}
+
+    case $choice in
+        1)
+            echo -e "${YELLOW}Ubuntu 24.04${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh ubuntu 24.04 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        2)
+            echo -e "${YELLOW}Ubuntu 22.04${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh ubuntu 22.04 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        3)
+            echo -e "${YELLOW}Ubuntu 20.04${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh ubuntu 20.04 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        4)
+            echo -e "${YELLOW}Ubuntu 18.04${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh ubuntu 18.04 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        5)
+            echo -e "${YELLOW}Debian 13${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh debian 13 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        6)
+            echo -e "${YELLOW}Debian 12${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh debian 12 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        7)
+            echo -e "${YELLOW}Debian 11${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh debian 11 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        8)
+            echo -e "${YELLOW}Debian 10${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh debian 10 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        9)
+            echo -e "${YELLOW}CentOS Stream 10${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh centos 10 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        10)
+            echo -e "${YELLOW}CentOS Stream 9${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh centos 9 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        11)
+            echo -e "${YELLOW}CentOS 8 (leitbogioro)${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/InstallNET.sh -centos 8 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        12)
+            echo -e "${YELLOW}CentOS 7 (leitbogioro)${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/InstallNET.sh -centos 7 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        13)
+            echo -e "${YELLOW}Windows 10 Pro DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}Teddysun.com${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/cn/win10ltsc_x64_vhdx.gz\" --password Teddysun.com"
+            is_windows=true
+            ;;
+        14)
+            echo -e "${YELLOW}Windows 11 Pro DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}Teddysun.com${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/cn/win11_pro_x64_vhdx.gz\" --password Teddysun.com"
+            is_windows=true
+            ;;
+        15)
+            echo -e "${YELLOW}Windows 11 ARM DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}Teddysun.com${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/arm64/win11_arm64.img.gz\" --password Teddysun.com"
+            is_windows=true
+            ;;
+        16)
+            echo -e "${YELLOW}Windows 7 DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}123@@@abc${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/cn/win7_sp1_ent.img.gz\" --password 123@@@abc"
+            is_windows=true
+            ;;
+        17)
+            echo -e "${YELLOW}Windows Server 2025 ISO 安装${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            read -p "请输入密码 (留空默认 12345): " win_pass
+            win_pass=${win_pass:-12345}
+            echo -e "密码: ${GREEN}${win_pass}${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh windows --image-name=\"Windows Server 2025\" --lang en-us --password $win_pass"
+            is_windows=true
+            ;;
+        18)
+            echo -e "${YELLOW}Windows Server 2022 DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}Teddysun.com${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/cn/windows2022_x64_vhdx.gz\" --password Teddysun.com"
+            is_windows=true
+            ;;
+        19)
+            echo -e "${YELLOW}Windows Server 2019 DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}Teddysun.com${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/cn/windows2019_x64_vhdx.gz\" --password Teddysun.com"
+            is_windows=true
+            ;;
+        20)
+            echo -e "${YELLOW}Windows Server 2016 DD 镜像${RESET}"
+            echo -e "用户名: ${GREEN}${win_user}${RESET}"
+            echo -e "密码: ${GREEN}Teddysun.com${RESET}"
+            echo -e "端口: ${GREEN}${win_port}${RESET} (RDP)"
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            install_cmd="bash /tmp/reinstall.sh dd --img=\"https://dl.lamp.sh/vhd/cn/windows2016_x64_vhdx.gz\" --password Teddysun.com"
+            is_windows=true
+            ;;
+        21)
+            echo -e "${YELLOW}Rocky Linux 10${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh rocky 10 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        22)
+            echo -e "${YELLOW}Rocky Linux 9${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh rocky 9 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        23)
+            echo -e "${YELLOW}AlmaLinux 10${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh almalinux 10 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        24)
+            echo -e "${YELLOW}AlmaLinux 9${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh almalinux 9 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        25)
+            echo -e "${YELLOW}Oracle Linux 10${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh oracle 10 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        26)
+            echo -e "${YELLOW}Oracle Linux 9${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh oracle 9 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        27)
+            echo -e "${YELLOW}Fedora Linux 43${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh fedora 43 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        28)
+            echo -e "${YELLOW}Fedora Linux 42${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh fedora 42 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        29)
+            echo -e "${YELLOW}Alpine Linux 3.23${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh alpine 3.23 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        30)
+            echo -e "${YELLOW}Alpine Linux 3.22${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh alpine 3.22 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        31)
+            echo -e "${YELLOW}Alpine Linux 3.21${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh alpine 3.21 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        32)
+            echo -e "${YELLOW}Arch Linux${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh arch --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        33)
+            echo -e "${YELLOW}Kali Linux${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh kali --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        34)
+            echo -e "${YELLOW}openSUSE 15.6${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh opensuse 15.6 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        35)
+            echo -e "${YELLOW}openSUSE 16.0${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh opensuse 16.0 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        36)
+            echo -e "${YELLOW}openEuler 24.03${RESET}"
+            echo -e "用户名: ${GREEN}${linux_user}${RESET}"
+            echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
+            read -p "请输入密码 (留空随机生成): " root_password
+            if [ -z "$root_password" ]; then
+                root_password=$(generate_random_password)
+            fi
+            install_cmd="bash /tmp/reinstall.sh openeuler 24.03 --password $root_password"
+            echo -e "密码: ${GREEN}${root_password}${RESET}"
+            ;;
+        37)
+            read -p "请输入 DD 镜像直链地址: " dd_url
+            if [ -z "$dd_url" ]; then
+                echo -e "${RED}镜像地址不能为空${RESET}"
+                return 1
+            fi
+            read -p "请输入镜像密码 (留空无密码): " dd_password
+            echo -e "用户名: ${GREEN}administrator${RESET}"
+            echo -e "端口: ${GREEN}3389${RESET} (RDP)"
+            if [ -n "$dd_password" ]; then
+                echo -e "密码: ${GREEN}${dd_password}${RESET}"
+            else
+                echo -e "密码: ${YELLOW}无密码${RESET}"
+            fi
+            read -p "确认安装？(y/n，默认 y): " confirm
+            confirm=${confirm:-y}
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}已取消${RESET}"
+                return 0
+            fi
+            if [ -n "$dd_password" ]; then
+                install_cmd="bash /tmp/reinstall.sh dd --img=$dd_url --password $dd_password"
+            else
+                install_cmd="bash /tmp/reinstall.sh dd --img=$dd_url"
+            fi
+            is_custom_dd=true
+            ;;
+        *) 
+            echo -e "${RED}无效选项${RESET}"
+            return 1
+            ;;
+    esac
+    
+    if [ -n "$install_cmd" ]; then
+        echo ""
+        echo -e "${YELLOW}即将执行: ${install_cmd}${RESET}"
+        echo -e "${RED}执行后会自动重启${RESET}"
+        read -p "确认执行？(y/n，默认 y): " confirm
+        confirm=${confirm:-y}
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            echo -e "${GREEN}正在执行安装命令，执行后自动重启...${RESET}"
+            sleep 2
+            eval "$install_cmd" && reboot
+        else
+            echo -e "${YELLOW}已取消${RESET}"
+        fi
+    fi
+    
+    return 0
+}
+
+dd_reinstall_menu() {
+    if ! dd_is_interactive; then
+        echo -e "${YELLOW}检测到非交互模式，显示 DD 重装菜单${RESET}"
+        dd_show_dd_menu
+        return 0
+    fi
+    
+    if ! dd_download_scripts; then
+        dd_wait_for_enter
+        return 1
+    fi
+    
+    while true; do
+        dd_show_dd_menu
+        read -p "请输入选项: " choice
+        
+        if [ -z "$choice" ]; then
+            echo ""
+            break
+        fi
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le 37 ]; then
+            dd_execute_install "$choice"
+        else
+            echo -e "${RED}无效选项，请输入 1-37 之间的数字或直接回车返回${RESET}"
+        fi
+        
+        dd_wait_for_enter
+    done
+}
+
+
+# ===== DD结束 =====
+
+# ============================================
+# FileBrowser 一键部署脚本 - 整合版
+# ============================================
+
+FB_RED='\033[0;31m'
+FB_GREEN='\033[0;32m'
+FB_YELLOW='\033[0;33m'
+FB_BLUE='\033[0;34m'
+FB_NC='\033[0m'
+
+fb_has_systemctl() { command -v systemctl &> /dev/null; }
+
+FB_CONTAINER_NAME="filebrowser"
+FB_DATA_DIR="/opt/filebrowser"
+FB_SHARE_DIR="$FB_DATA_DIR/shared"
+FB_DB_FILE="$FB_DATA_DIR/database.db"
+FB_CONFIG_FILE="$FB_DATA_DIR/config.json"
+FB_PORT=8080
+FB_IMAGE="filebrowser/filebrowser:latest"
+
+fb_info() { echo -e "${FB_GREEN}[信息]${FB_NC} $1" >&2; }
+fb_warn() { echo -e "${FB_YELLOW}[警告]${FB_NC} $1" >&2; }
+fb_error() { echo -e "${FB_RED}[错误]${FB_NC} $1" >&2; return 1; }
+
+fb_detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        FB_OS=$ID
+        FB_VER=$VERSION_ID
+    else
+        fb_error "无法检测操作系统"
+    fi
+    case $FB_OS in
+        ubuntu|debian)
+            FB_PKG_MANAGER="apt"; FB_INSTALL_CMD="apt install -y"; FB_UPDATE_CMD="apt update"
+            ;;
+        centos|rhel|rocky|almalinux)
+            FB_PKG_MANAGER="yum"
+            if command -v dnf >/dev/null 2>&1; then FB_PKG_MANAGER="dnf"; fi
+            FB_INSTALL_CMD="$FB_PKG_MANAGER install -y"; FB_UPDATE_CMD="$FB_PKG_MANAGER update -y"
+            if ! rpm -q epel-release >/dev/null 2>&1; then $FB_INSTALL_CMD epel-release; fi
+            ;;
+        fedora)
+            FB_PKG_MANAGER="dnf"; FB_INSTALL_CMD="dnf install -y"; FB_UPDATE_CMD="dnf update -y"
+            ;;
+        *)
+            fb_error "不支持的操作系统: $FB_OS"
+            ;;
+    esac
+}
+
+fb_fix_dpkg() {
+    if [[ "$FB_PKG_MANAGER" == "apt" ]]; then
+        fb_info "检查 dpkg 状态..."
+        if dpkg --audit >/dev/null 2>&1; then
+            fb_info "发现 dpkg 中断，正在修复..."
+            dpkg --configure -a
+            if ! dpkg --audit >/dev/null 2>&1; then apt --fix-broken install -y; fi
+        fi
+    fi
+}
+
+fb_check_network() {
+    fb_info "检查网络连通性..."
+    if ping -c 1 8.8.8.8 >/dev/null 2>&1; then fb_info "网络连接正常"; else fb_warn "网络连接可能有问题，但继续执行..."; fi
+}
+
+fb_install_docker() {
+    if command -v docker >/dev/null 2>&1; then fb_info "Docker 已安装"; return; fi
+    fb_info "正在安装 Docker..."
+    case $FB_PKG_MANAGER in
+        apt)
+            $FB_UPDATE_CMD && $FB_INSTALL_CMD apt-transport-https ca-certificates curl software-properties-common
+            curl -fsSL https://download.docker.com/linux/$FB_OS/gpg | apt-key add -
+            add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/$FB_OS $(lsb_release -cs) stable" -y
+            $FB_UPDATE_CMD && $FB_INSTALL_CMD docker-ce
+            ;;
+        yum|dnf)
+            $FB_INSTALL_CMD yum-utils
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            $FB_INSTALL_CMD docker-ce docker-ce-cli containerd.io
+            ;;
+    esac
+    if fb_has_systemctl; then systemctl enable --now docker; fi
+    fb_info "Docker 安装完成"
+}
+
+fb_install_deps() {
+    fb_info "检查系统依赖..."
+    local missing_deps=()
+    for cmd in curl nginx; do if ! command -v $cmd >/dev/null 2>&1; then missing_deps+=($cmd); fi; done
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        fb_info "安装缺失的依赖: ${missing_deps[@]}"
+        $FB_UPDATE_CMD && $FB_INSTALL_CMD ${missing_deps[@]}
+    fi
+    if ! command -v certbot >/dev/null 2>&1; then
+        fb_info "安装 Certbot..."
+        case $FB_PKG_MANAGER in
+            apt) $FB_INSTALL_CMD certbot python3-certbot-nginx ;;
+            yum|dnf)
+                $FB_INSTALL_CMD certbot python3-certbot-nginx
+                if [ "$FB_PKG_MANAGER" = "yum" ] && ! command -v certbot >/dev/null 2>&1; then
+                    $FB_INSTALL_CMD epel-release && $FB_INSTALL_CMD certbot python3-certbot-nginx
+                fi
+                ;;
+        esac
+        if fb_has_systemctl; then systemctl enable --now certbot.timer 2>/dev/null || true; fi
+    fi
+    if ! command -v netstat >/dev/null 2>&1; then $FB_INSTALL_CMD net-tools; fi
+    fb_info "依赖检查完成"
+}
+
+fb_check_port() {
+    local port=$1
+    if netstat -tuln 2>/dev/null | grep -q ":${port} "; then return 1
+    elif ss -tuln 2>/dev/null | grep -q ":${port} "; then return 1; fi
+    return 0
+}
+
+fb_auto_select_port() {
+    local start_port=$1 port=$start_port
+    while ! fb_check_port $port; do
+        fb_warn "端口 $port 已被占用，自动选择新端口..."
+        port=$((port + 1))
+        if [ $port -gt 65535 ]; then fb_error "无法找到可用端口"; fi
+    done
+    echo "$port"
+}
+
+fb_prepare_dirs() {
+    mkdir -p "$FB_DATA_DIR" && mkdir -p "$FB_SHARE_DIR"
+    chown -R 1000:1000 "$FB_DATA_DIR"
+    chmod 755 "$FB_DATA_DIR" && chmod 755 "$FB_SHARE_DIR"
+}
+
+fb_start_filebrowser() {
+    fb_info "启动 FileBrowser 容器..."
+    docker run -d --name=$FB_CONTAINER_NAME --restart=unless-stopped \
+        -v $FB_DATA_DIR:/data -v $FB_SHARE_DIR:/srv -p $FB_PORT:80 -u 1000:1000 $FB_IMAGE \
+        -r /srv -d /data/database.db -c /data/config.json --address=0.0.0.0 --port=80
+    sleep 5
+    if docker ps | grep -q $FB_CONTAINER_NAME; then
+        fb_info "FileBrowser 容器启动成功"
+        local password=$(docker logs $FB_CONTAINER_NAME 2>&1 | grep -o 'password: [^ ]\+' | cut -d' ' -f2 | head -1)
+        if [ -n "$password" ]; then
+            fb_info "初始管理员密码: $password"
+            echo "$password" > $FB_DATA_DIR/admin_password.txt
+        fi
+    else
+        fb_error "FileBrowser 容器启动失败，请检查日志: docker logs $FB_CONTAINER_NAME"
+    fi
+}
+
+fb_configure_nginx_http() {
+    local domain=$1
+    if ! fb_check_port 80; then
+        fb_warn "端口 80 被占用，尝试自动释放..."
+        if fb_has_systemctl && systemctl is-active --quiet nginx; then
+            fb_info "停止 Nginx 以释放 80 端口..."
+            systemctl stop nginx; sleep 2
+        fi
+        if ! fb_check_port 80; then fb_error "无法释放 80 端口"; fi
+    fi
+    local nginx_conf="/etc/nginx/sites-available/$domain"
+    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
+    cat > $nginx_conf <<'EOF'
+server {
+    listen 80;
+    server_name DOMAIN_PLACEHOLDER;
+    client_max_body_size 0;
+    location / {
+        proxy_pass http://127.0.0.1:FB_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+EOF
+    sed -i "s/DOMAIN_PLACEHOLDER/$domain/g; s/FB_PORT_PLACEHOLDER/$FB_PORT/g" $nginx_conf
+    ln -sf $nginx_conf /etc/nginx/sites-enabled/ && rm -f /etc/nginx/sites-enabled/default
+    nginx -t
+    if fb_has_systemctl; then systemctl reload nginx; fi
+    fb_info "Nginx HTTP 配置完成 (反代到端口 $FB_PORT)"
+}
+
+fb_configure_ssl() {
+    local domain=$1
+    fb_info "正在为 $domain 申请 SSL 证书..."
+    certbot --nginx -d $domain --non-interactive --agree-tos --email "admin@$domain" --redirect
+    local ssl_conf="/etc/nginx/sites-available/$domain"
+    if ! grep -q "client_max_body_size" "$ssl_conf"; then
+        sed -i '/listen 443 ssl;/a \    client_max_body_size 0;' "$ssl_conf"
+        nginx -t
+        if fb_has_systemctl; then systemctl reload nginx; fi
+    fi
+    fb_info "SSL 证书配置完成，证书自动续签已启用"
+}
+
+fb_get_public_ip() {
+    local ipv4=$(curl -4 -s ifconfig.me 2>/dev/null)
+    if [ -n "$ipv4" ] && [[ "$ipv4" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "$ipv4"
+    else local ipv6=$(curl -6 -s ifconfig.me 2>/dev/null); echo "${ipv6:-127.0.0.1}"; fi
+}
+
+fb_check_dns() {
+    local domain=$1
+    fb_info "检查域名解析..."
+    if ! nslookup $domain >/dev/null 2>&1; then
+        fb_warn "域名 $domain 解析失败"
+        read -p "是否继续？(y/N): " choice
+        [[ "$choice" != "y" && "$choice" != "Y" ]] && exit 1
+    else fb_info "域名解析正常"; fi
+}
+
+fb_reset_password() {
+    if ! docker ps | grep -q $FB_CONTAINER_NAME; then fb_error "FileBrowser 容器未运行"; fi
+    read -p "请输入新密码: " newpass
+    if [ -z "$newpass" ]; then fb_error "密码不能为空"; fi
+    fb_info "正在重置密码..."
+    if docker exec -t $FB_CONTAINER_NAME timeout 30 filebrowser -d /data/database.db users update admin -p "$newpass" 2>&1; then
+        fb_info "密码已更新"
+    else fb_error "重置密码失败"; fi
+}
+
+fb_release_port_80() {
+    if ! fb_has_systemctl || ! systemctl is-active --quiet nginx; then fb_warn "Nginx 未运行"; return; fi
+    fb_info "停止 Nginx 服务以释放 80 端口..." && systemctl stop nginx
+    fb_info "80 端口已释放"
+    read -p "申请完成后，按回车键恢复 Nginx 服务..."
+    if fb_has_systemctl; then systemctl start nginx && fb_info "Nginx 已恢复"; fi
+}
+
+fb_auto_cert_helper() {
+    fb_info "自动证书申请助手：将释放 80 端口，执行您的命令，完成后自动恢复 Nginx"
+    read -p "请输入证书申请命令: " cert_cmd
+    if [ -z "$cert_cmd" ]; then fb_error "命令不能为空"; fi
+    local nginx_was_running=false
+    if fb_has_systemctl && systemctl is-active --quiet nginx; then
+        nginx_was_running=true
+        fb_info "停止 Nginx..." && systemctl stop nginx && sleep 2
+    fi
+    fb_info "执行命令..." && eval "$cert_cmd" && local ret=$? || local ret=$?
+    if [ "$nginx_was_running" = true ]; then
+        if fb_has_systemctl; then
+            systemctl start nginx
+            if systemctl is-active --quiet nginx; then fb_info "Nginx 已恢复"; else fb_warn "Nginx 启动失败"; fi
+        fi
+    fi
+    if [ $ret -eq 0 ]; then fb_info "命令执行成功！"; else fb_warn "命令执行失败"; fi
+}
+
+fb_install_filebrowser() {
+    echo "=========================================="
+    echo "FileBrowser 一键部署安装流程"
+    echo "=========================================="
+    fb_check_network && fb_detect_os && fb_fix_dpkg && fb_install_docker && fb_install_deps
+
+    local mode="" domain=""
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo "请选择安装类型："
+        echo "1) 域名模式 (带SSL证书)"
+        echo "2) IP模式 (仅HTTP访问)"
+        read -p "请选择 (1 或 2): " mode
+        case $mode in
+            1)
+                read -p "请输入你的域名 (例如: file.example.com): " domain
+                if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+                    fb_warn "域名格式可能不正确，继续？(y/N): "; read choice; [[ "$choice" != "y" && "$choice" != "Y" ]] && exit 1
+                fi
+                fb_info "使用域名: $domain"; fb_check_dns $domain
+                ;;
+            2) fb_info "使用 IP 模式" ;;
+            *) fb_error "无效选项" ;;
+        esac
+    else
+        fb_info "非交互模式，自动选择 IP模式安装"; mode=2
+    fi
+
+    FB_PORT=$(fb_auto_select_port $FB_PORT)
+    fb_info "使用端口: $FB_PORT"
+    fb_info "拉取 FileBrowser 镜像..." && docker pull $FB_IMAGE
+    fb_prepare_dirs && fb_start_filebrowser
+
+    if [ -n "$domain" ]; then
+        fb_configure_nginx_http $domain && fb_configure_ssl $domain
+        fb_info "安装完成！访问地址: https://$domain"
+    else
+        fb_info "安装完成！访问地址: http://$(fb_get_public_ip):$FB_PORT"
+    fi
+
+    if [ -f "$FB_DATA_DIR/admin_password.txt" ]; then
+        password=$(cat "$FB_DATA_DIR/admin_password.txt")
+        fb_info "默认用户名: admin, 初始密码: $password"
+    else
+        password=$(docker logs $FB_CONTAINER_NAME 2>&1 | grep -o 'password: [^ ]\+' | cut -d' ' -f2 | head -1)
+        if [ -n "$password" ]; then
+            fb_info "默认用户名: admin, 初始密码: $password"
+            echo "$password" > "$FB_DATA_DIR/admin_password.txt"
+        else fb_info "默认用户名: admin, 初始密码: 请查看容器日志"; fi
+    fi
+    fb_info "首次登录后请立即修改密码"
+    fb_info "上传的文件将保存在: $FB_SHARE_DIR"
+    fb_info "快捷命令已创建: filebrowser"
+}
+
+fb_uninstall_full() {
+    read -p "确定要完全卸载 FileBrowser 吗？这将删除所有数据 (y/N): " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
+    fb_info "注意：上传的文件保存在 $FB_SHARE_DIR"
+    read -p "是否同时删除所有上传的文件？(y/N): " del_files
+    if [[ "$del_files" == "y" || "$del_files" == "Y" ]]; then
+        read -p "再次确认删除所有上传的文件？(y/N): " confirm2
+        if [[ "$confirm2" == "y" || "$confirm2" == "Y" ]]; then
+            fb_info "删除上传的文件..." && rm -rf "$FB_SHARE_DIR"/* && rm -rf "$FB_SHARE_DIR"/.[!.]* 2>/dev/null || true
+        fi
+    fi
+    fb_info "停止并删除 FileBrowser 容器..." && docker stop $FB_CONTAINER_NAME 2>/dev/null || true && docker rm $FB_CONTAINER_NAME 2>/dev/null || true
+    fb_info "删除 FileBrowser 数据目录..." && rm -rf $FB_DATA_DIR
+    for file in /etc/nginx/sites-enabled/*; do
+        if [ -f "$file" ] && grep -q "proxy_pass.*$FB_PORT" "$file" 2>/dev/null; then rm -f "$file"; fi
+    done
+    if fb_has_systemctl; then systemctl reload nginx 2>/dev/null || true; fi
+    rm -f /usr/local/bin/filebrowser /usr/local/bin/filebrowser-manager 2>/dev/null || true
+    fb_info "FileBrowser 已完全卸载"
+}
+
+fb_uninstall_keep_data() {
+    read -p "确定要卸载 FileBrowser（保留数据）吗？(y/N): " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && return
+    fb_info "停止并删除 FileBrowser 容器..." && docker stop $FB_CONTAINER_NAME 2>/dev/null || true && docker rm $FB_CONTAINER_NAME 2>/dev/null || true
+    fb_info "数据目录保留在 $FB_DATA_DIR，上传文件保留在 $FB_SHARE_DIR"
+    rm -f /usr/local/bin/filebrowser /usr/local/bin/filebrowser-manager 2>/dev/null || true
+}
+
+fb_show_status() {
+    if docker ps -a | grep -q $FB_CONTAINER_NAME; then
+        echo "FileBrowser 容器状态:"
+        docker ps -a --filter name=$FB_CONTAINER_NAME --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+        if docker ps | grep -q $FB_CONTAINER_NAME; then echo "容器正在运行"; else echo "容器已停止"; fi
+    else echo "FileBrowser 容器不存在"; fi
+    if grep -r "proxy_pass.*$FB_PORT" /etc/nginx/sites-enabled/ 2>/dev/null | grep -q .; then echo "Nginx 反向代理已配置"; else echo "未检测到 Nginx 反向代理配置"; fi
+}
+
+fb_show_data_location() {
+    echo "FileBrowser 数据目录: $FB_DATA_DIR"
+    echo "数据库文件: $FB_DB_FILE"
+    echo "配置文件: $FB_CONFIG_FILE"
+    [ -f "$FB_DATA_DIR/admin_password.txt" ] && echo "初始密码文件: $FB_DATA_DIR/admin_password.txt"
+    echo "上传的文件存储位置: $FB_SHARE_DIR"
+}
+
+fb_show_logs() {
+    if docker ps -a | grep -q $FB_CONTAINER_NAME; then docker logs $FB_CONTAINER_NAME --tail 50; else echo "FileBrowser 容器不存在"; fi
+}
+
+fb_restart_service() {
+    if docker ps -a | grep -q $FB_CONTAINER_NAME; then
+        docker restart $FB_CONTAINER_NAME && fb_info "FileBrowser 容器已重启"
+        if fb_has_systemctl; then systemctl reload nginx 2>/dev/null || true; fi
+    else fb_error "FileBrowser 容器不存在"; fi
+}
+
+fb_show_current_password() {
+    if [ -f "$FB_DATA_DIR/admin_password.txt" ]; then
+        echo "初始密码（如果未修改）: $(cat $FB_DATA_DIR/admin_password.txt)"
+        echo "如果密码已被修改，请使用菜单选项7重置密码"
+    else echo "未找到初始密码文件"; fi
+    echo "当前密码也可从容器日志查看: docker logs $FB_CONTAINER_NAME | grep password"
+}
+
+fb_main_menu() {
+    while true; do
+        echo "=========================================="
+        echo "FileBrowser 管理菜单"
+        echo "=========================================="
+        echo "1) 安装 FileBrowser - IP模式或域名模式"
+        echo "2) 完全卸载 FileBrowser (删除所有数据)"
+        echo "3) 卸载 FileBrowser (保留数据)"
+        echo "4) 查看状态"
+        echo "5) 查看数据位置"
+        echo "6) 查看日志"
+        echo "7) 重置密码"
+        echo "8) 重启服务"
+        echo "9) 查看当前密码"
+        echo "10) 手动释放 80 端口"
+        echo "11) 自动证书申请助手"
+        echo "0) 返回主菜单"
+        echo "=========================================="
+        read -p "请选择操作 [0-11]: " choice
+        case $choice in
+            1) fb_install_filebrowser ;;
+            2) fb_uninstall_full ;;
+            3) fb_uninstall_keep_data ;;
+            4) fb_show_status ;;
+            5) fb_show_data_location ;;
+            6) fb_show_logs ;;
+            7) fb_reset_password ;;
+            8) fb_restart_service ;;
+            9) fb_show_current_password ;;
+            10) fb_release_port_80 ;;
+            11) fb_auto_cert_helper ;;
+            0) echo "返回主菜单..."; break ;;
+            *) echo "无效选项" ;;
+        esac
+        echo -e "${YELLOW}按回车键返回子菜单...${RESET}"; if [ -t 0 ]; then read -p "" </dev/null || true; fi
+    done
+}
+
 show_menu() {
     while true; do
         echo -e "${GREEN}=============================================${RESET}"
@@ -146,7 +1227,7 @@ show_menu() {
         echo -e "${YELLOW}10.一键解除禁用IPv6${RESET}"
         echo -e "${YELLOW}11.服务器时区修改为中国时区${RESET}"
         echo -e "${YELLOW}12.保持SSH会话一直连接不断开${RESET}"
-        echo -e "${YELLOW}13.安装Windows或Linux系统${RESET}"
+        echo -e "${YELLOW}13.DD重装系统(Win/Linux)${RESET}"
         echo -e "${YELLOW}14.服务器对服务器文件传输${RESET}"
         echo -e "${YELLOW}15.安装探针并绑定域名${RESET}"
         echo -e "${YELLOW}16.共用端口（反代NPM）${RESET}"
@@ -158,6 +1239,7 @@ show_menu() {
         echo -e "${YELLOW}22.网心云安装${RESET}" 
         echo -e "${YELLOW}23.3X-UI搭建${RESET}"
         echo -e "${YELLOW}24.S-UI搭建${RESET}"
+        echo -e "${YELLOW}25. FileBrowser安装"
         echo -e "${GREEN}=============================================${RESET}"
 
         read -p "请输入选项 (输入 'q' 退出): " option
@@ -174,7 +1256,7 @@ show_menu() {
             0)
                 # 脚本更新
                 echo -e "${GREEN}正在更新脚本...${RESET}"
-                wget -O /tmp/onekey.sh https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh
+                wget -O /tmp/onekey.sh https://raw.githubusercontent.com/sinian-liu/onekey/main/onekey.sh
                 if [ $? -eq 0 ]; then
                     mv /tmp/onekey.sh /usr/local/bin/onekey.sh
                     chmod +x /usr/local/bin/onekey.sh
@@ -1217,52 +2299,9 @@ EOF
                 read -p "按回车键返回主菜单..."
                 ;;
             13)
-                # KVM安装系统
-                check_system() {
-                    if grep -qi "debian" /etc/os-release || grep -qi "ubuntu" /etc/os-release; then
-                        SYSTEM="debian"
-                    elif grep -qi "centos" /etc/os-release || grep -qi "red hat" /etc/os-release; then
-                        SYSTEM="centos"
-                    else
-                        SYSTEM="unknown"
-                    fi
-                }
-
-                echo -e "${GREEN}开始安装 KVM 系统...${RESET}"
-                check_system
-
-                if [ "$SYSTEM" == "debian" ]; then
-                    echo -e "${YELLOW}检测到系统为 Debian/Ubuntu，开始安装必要依赖...${RESET}"
-                    apt-get install -y xz-utils openssl gawk file wget screen
-                    if [ $? -eq 0 ]; then
-                        echo -e "${YELLOW}必要依赖安装完成，开始更新系统软件包...${RESET}"
-                        apt update -y && apt dist-upgrade -y
-                        if [ $? -ne 0 ]; then
-                            echo -e "${RED}系统更新失败，请检查网络或镜像源！${RESET}"
-                        fi
-                    else
-                        echo -e "${RED}必要依赖安装失败，请检查网络或镜像源！${RESET}"
-                    fi
-                elif [ "$SYSTEM" == "centos" ]; then
-                    echo -e "${YELLOW}检测到系统为 RedHat/CentOS，开始安装必要依赖...${RESET}"
-                    yum install -y xz openssl gawk file glibc-common wget screen
-                    if [ $? -ne 0 ]; then
-                        echo -e "${RED}依赖安装失败，请检查网络或镜像源！${RESET}"
-                    fi
-                else
-                    echo -e "${RED}不支持的操作系统！${RESET}"
-                fi
-
-                echo -e "${YELLOW}开始下载并运行安装脚本...${RESET}"
-                wget --no-check-certificate -O /tmp/NewReinstall.sh https://git.io/newbetags
-                if [ $? -eq 0 ]; then
-                    chmod a+x /tmp/NewReinstall.sh
-                    bash /tmp/NewReinstall.sh
-                    rm -f /tmp/NewReinstall.sh
-                    echo -e "${GREEN}安装完成！${RESET}"
-                else
-                    echo -e "${RED}脚本下载失败，请检查网络或镜像源！${RESET}"
-                fi
+                # DD重装系统
+                echo -e "${GREEN}正在进入 DD 重装系统...${NC}"
+                dd_reinstall_menu
                 read -p "按回车键返回主菜单..."
                 ;;
             14)
@@ -5223,6 +6262,12 @@ EOF"
                 else
                     echo -e "${RED}s-ui 安装失败，请检查网络或运行 's-ui log' 查看错误详情！${RESET}"
                 fi
+                read -p "按回车键返回主菜单..."
+                ;;
+                25)
+                # FileBrowser 安装
+                echo -e "${GREEN}正在进入 FileBrowser 安装管理...${RESET}"
+                fb_main_menu
                 read -p "按回车键返回主菜单..."
                 ;;
             *)
