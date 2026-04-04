@@ -114,16 +114,6 @@ update_system() {
     return 0
 }
 
-# 增加快捷命令 s 设置（如果没有的话）
-if ! grep -q "alias s=" ~/.bashrc; then
-    echo "正在为 s 设置快捷命令..."
-    echo "alias s='bash <(curl -sL https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh)'" >> ~/.bashrc
-    source ~/.bashrc
-    echo "快捷命令 s 已设置。"
-else
-    echo "快捷命令 s 已经存在。"
-fi
-
 # 主菜单函数
 # ===== DD重装系统函数 =====
 
