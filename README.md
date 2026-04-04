@@ -6,17 +6,17 @@
 ### 方式一：下载后运行（推荐）
 
 ```bash
-wget -O /root/new-onekey.sh https://raw.githubusercontent.com/anjing-liu/new-onekey/main/new-onekey.sh && chmod +x /root/new-onekey.sh && /root/new-onekey.sh
+wget -O /root/onekey.sh https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh && chmod +x /root/onekey.sh && /root/onekey.sh
 ```
 
 ### 方式二：直接运行
 
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/anjing-liu/new-onekey/main/new-onekey.sh)
+bash <(curl -sL https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh)
 
 ```
 
-**首次运行会自动安装到 `/root/new-onekey`，并设置 `s` 命令。以后只需输入 `s` 即可运行。**
+**首次运行会自动安装到 `/root/onekey`，并设置 `s` 命令。以后只需输入 `s` 即可运行。**
 
 ## 功能菜单
 
