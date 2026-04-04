@@ -117,7 +117,7 @@ update_system() {
 # 增加快捷命令 s 设置（如果没有的话）
 if ! grep -q "alias s=" ~/.bashrc; then
     echo "正在为 s 设置快捷命令..."
-    echo "alias s='bash <(curl -sL https://raw.githubusercontent.com/sinian-liu/onekey/main/onekey.sh)'" >> ~/.bashrc
+    echo "alias s='bash <(curl -sL https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh)'" >> ~/.bashrc
     source ~/.bashrc
     echo "快捷命令 s 已设置。"
 else
@@ -1256,7 +1256,7 @@ show_menu() {
             0)
                 # 脚本更新
                 echo -e "${GREEN}正在更新脚本...${RESET}"
-                wget -O /tmp/onekey.sh https://raw.githubusercontent.com/sinian-liu/onekey/main/onekey.sh
+                wget -O /tmp/onekey.sh https://raw.githubusercontent.com/anjing-liu/onekey/main/onekey.sh
                 if [ $? -eq 0 ]; then
                     mv /tmp/onekey.sh /usr/local/bin/onekey.sh
                     chmod +x /usr/local/bin/onekey.sh
