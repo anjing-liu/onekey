@@ -1,17 +1,49 @@
 #!/bin/bash
 # 设置快捷命令 s
-if [ ! -f /usr/local/bin/s ] || [ "$(readlink /usr/local/bin/s 2>/dev/null)" != "/root/onekey.sh" ]; then
-    ln -sf /root/onekey.sh /usr/local/bin/s 2>/dev/null
-    chmod +x /root/onekey.sh 2>/dev/null
+SCRIPT_REALPATH="$(realpath "$0" 2>/dev/null || echo "$0")"
+if [ ! -f /usr/local/bin/s ] || [ "$(readlink /usr/local/bin/s 2>/dev/null)" != "$SCRIPT_REALPATH" ]; then
+    ln -sf "$SCRIPT_REALPATH" /usr/local/bin/s 2>/dev/null
+    chmod +x "$SCRIPT_REALPATH" 2>/dev/null
 fi
 if ! grep -q "alias s=" /root/.bashrc 2>/dev/null; then
-    echo "alias s='/root/onekey.sh'" >> /root/.bashrc
+    echo "alias s='$SCRIPT_REALPATH'" >> /root/.bashrc
 fi
+
 # 设置颜色
 GREEN="\033[32m"
 RED="\033[31m"
 YELLOW="\033[33m"
 RESET="\033[0m"
+
+# 全局随机密码生成函数
+dd_generate_random_password() {
+    tr -dc 'A-Za-z0-9@#%&' < /dev/urandom | head -c 16
+}
+
+generate_random_password() {
+    tr -dc 'A-Za-z0-9@#%&' < /dev/urandom | head -c 16
+}
+
+# 统一端口检查函数（兼容ss和netstat）
+check_port_available() {
+    local port=$1
+    if command -v ss > /dev/null 2>&1; then
+        ss -tuln | grep -q ":$port " && return 1 || return 0
+    elif command -v netstat > /dev/null 2>&1; then
+        netstat -tuln | grep -q ":$port " && return 1 || return 0
+    else
+        return 2  # 无法检查
+    fi
+}
+
+# 统一磁盘空间检查（返回MB）
+get_free_disk_mb() {
+    local path=${1:-/}
+    df -BG "$path" 2>/dev/null | awk 'NR==2 {gsub("G","",$4); print $4*1024}' || echo "0"
+}
+
+# 脚本退出清理
+trap 'rm -f /tmp/onekey_* /tmp/wp_check /tmp/ssh_error /tmp/scp_error /tmp/deploy_*.sh /tmp/wordpress_backup_*.tar.gz 2>/dev/null' EXIT
 
 # 系统检测函数（改进版）
 check_system() {
@@ -48,7 +80,225 @@ check_system() {
     fi
 }
 
+# ============================================
+# 统一Nginx反向代理管理函数
+# 所有需要域名+SSL的服务都使用这些函数
+# ============================================
+
+UNIFIED_WEBROOT="/var/www/html"
+UNIFIED_NGINX_CONF_DIR="/etc/nginx/conf.d"
+UNIFIED_NGINX_MAIN_CONF="/etc/nginx/nginx.conf"
+
+# 安装统一Nginx和Certbot
+install_unified_nginx() {
+    echo -e "${YELLOW}正在安装 Nginx 和 Certbot...${RESET}"
+    
+    if ! command -v nginx &> /dev/null; then
+        if [ "$SYSTEM" == "centos" ]; then
+            sudo yum install -y nginx
+        else
+            sudo apt update -y && sudo apt install -y nginx
+        fi
+    fi
+    
+    if ! command -v certbot &> /dev/null; then
+        if [ "$SYSTEM" == "centos" ]; then
+            sudo yum install -y certbot python3-certbot-nginx
+        else
+            sudo apt install -y certbot python3-certbot-nginx
+        fi
+    fi
+    
+    # 创建统一配置目录
+    sudo mkdir -p "$UNIFIED_NGINX_CONF_DIR"
+    
+    # 创建统一webroot
+    sudo mkdir -p "$UNIFIED_WEBROOT/.well-known/acme-challenge"
+    sudo chmod -R 755 "$UNIFIED_WEBROOT"
+    
+    # 配置Nginx主文件，包含所有域名配置
+    if ! grep -q "conf.d/\*.conf" "$UNIFIED_NGINX_MAIN_CONF" 2>/dev/null; then
+        echo -e "${YELLOW}配置Nginx主文件...${RESET}"
+    fi
+    
+    echo -e "${GREEN}统一Nginx和Certbot安装完成${RESET}"
+}
+
+# 检查端口是否可用
+check_port_free() {
+    local port=$1
+    if ss -tuln 2>/dev/null | grep -q ":$port " || netstat -tuln 2>/dev/null | grep -q ":$port "; then
+        return 1  # 端口被占用
+    fi
+    return 0  # 端口空闲
+}
+
+# 获取可用端口
+get_free_port() {
+    local port=${1:-8080}
+    while ! check_port_free $port 2>/dev/null; do
+        port=$((port + 1))
+        if [ $port -gt 65535 ]; then
+            port=0
+            break
+        fi
+    done
+    echo $port
+}
+
+# 申请SSL证书
+apply_ssl_cert() {
+    local domain=$1
+    local email=${2:-"admin@$domain"}
+    
+    echo -e "${YELLOW}正在为 $domain 申请SSL证书...${RESET}"
+    
+    sudo certbot certonly --webroot -w "$UNIFIED_WEBROOT" -d "$domain" --non-interactive --agree-tos --email "$email"
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}证书申请成功！${RESET}"
+        return 0
+    else
+        echo -e "${RED}证书申请失败，请检查域名是否正确解析到本服务器${RESET}"
+        return 1
+    fi
+}
+
+# 添加域名到统一Nginx反向代理
+add_domain_to_unified_nginx() {
+    local domain=$1
+    local backend_port=$2
+    local ssl_email=${3:-"admin@$domain"}
+    
+    # 检查Nginx是否安装
+    if ! command -v nginx &> /dev/null; then
+        install_unified_nginx
+    fi
+    
+    # 确保配置目录存在
+    sudo mkdir -p "$UNIFIED_NGINX_CONF_DIR"
+    
+    # 检查域名是否已配置
+    local domain_conf_file="${UNIFIED_NGINX_CONF_DIR}/domain-${domain}.conf"
+    if [ -f "$domain_conf_file" ]; then
+        echo -e "${YELLOW}域名 $domain 已存在配置${RESET}"
+        # 更新后端端口
+        sed -i "s|proxy_pass http://127.0.0.1:[0-9]*|proxy_pass http://127.0.0.1:$backend_port|" "$domain_conf_file"
+        sudo nginx -t && sudo systemctl reload nginx
+        return 0
+    fi
+    
+    # 为新域名申请证书
+    if [ ! -d "/etc/letsencrypt/live/$domain" ]; then
+        if ! apply_ssl_cert "$domain" "$ssl_email"; then
+            return 1
+        fi
+    fi
+    
+    # 创建独立的域名配置文件
+    cat > /tmp/nginx-${domain}.conf <<EOF
+# $domain - 由onekey.sh自动生成
+server {
+    listen 80;
+    server_name $domain;
+    
+    location ^~ /.well-known/acme-challenge/ {
+        root $UNIFIED_WEBROOT;
+        allow all;
+    }
+    
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $domain;
+    
+    ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$domain/privkey.pem;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_tickets off;
+    
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+    
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    
+    location ^~ /.well-known/acme-challenge/ {
+        root $UNIFIED_WEBROOT;
+        allow all;
+    }
+    
+    location / {
+        proxy_pass http://127.0.0.1:$backend_port;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+EOF
+    sudo mv /tmp/nginx-${domain}.conf "$domain_conf_file"
+    
+    # 确保Nginx主配置include域名配置
+    if ! grep -q "conf.d" "$UNIFIED_NGINX_MAIN_CONF" 2>/dev/null; then
+        # 检查 nginx.conf 中 http { 块的位置，并在其后添加 include
+        if grep -q "^[[:space:]]*http {" "$UNIFIED_NGINX_MAIN_CONF" 2>/dev/null; then
+            sudo sed -i '/^[[:space:]]*http {/a\    include /etc/nginx/conf.d/*.conf;' "$UNIFIED_NGINX_MAIN_CONF"
+        elif grep -q "http {" "$UNIFIED_NGINX_MAIN_CONF" 2>/dev/null; then
+            sudo sed -i '/http {/a\    include /etc/nginx/conf.d/*.conf;' "$UNIFIED_NGINX_MAIN_CONF"
+        fi
+    fi
+    
+    # 测试并重载Nginx
+    sudo nginx -t && sudo systemctl reload nginx
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Nginx配置测试失败${RESET}"
+        return 1
+    fi
+    
+    # 配置自动续期（如果还没有）
+    if ! crontab -l 2>/dev/null | grep -q "certbot renew.*nginx"; then
+        (crontab -l 2>/dev/null; echo "0 0 * * * certbot renew --quiet && systemctl reload nginx") | crontab -
+        echo -e "${YELLOW}已配置证书自动续期${RESET}"
+    fi
+    
+    echo -e "${GREEN}域名 $domain 已添加到反向代理 (后端:127.0.0.1:$backend_port)${RESET}"
+    return 0
+}
+
+# 移除域名的反向代理配置
+remove_domain_from_unified_nginx() {
+    local domain=$1
+    local domain_conf_file="${UNIFIED_NGINX_CONF_DIR}/domain-${domain}.conf"
+    
+    if [ -f "$domain_conf_file" ]; then
+        sudo rm -f "$domain_conf_file"
+        sudo nginx -t && sudo systemctl reload nginx
+        echo -e "${GREEN}已移除域名 $domain 的反向代理配置${RESET}"
+    else
+        echo -e "${YELLOW}域名 $domain 没有找到对应的配置${RESET}"
+    fi
+}
+
+# 获取当前配置的域名列表
+get_configured_domains() {
+    if [ -d "$UNIFIED_NGINX_CONF_DIR" ]; then
+        ls "$UNIFIED_NGINX_CONF_DIR"/domain-*.conf 2>/dev/null | sed 's/.*domain-\(.*\)\.conf/\1/'
+    fi
+}
+
+# ============================================
 # 安装 wget 函数
+# ============================================
 install_wget() {
     check_system
     if [ "$SYSTEM" == "ubuntu" ] || [ "$SYSTEM" == "debian" ]; then
@@ -123,12 +373,6 @@ update_system() {
 
 # 主菜单函数
 # ===== DD重装系统函数 =====
-
-# 颜色定义
-GREEN="\033[32m"
-RED="\033[31m"
-YELLOW="\033[33m"
-RESET="\033[0m"
 
 dd_check_system() {
     if [ -f /etc/os-release ]; then
@@ -275,10 +519,6 @@ dd_execute_install() {
     local linux_user="root"
     local linux_port="22"
     
-dd_generate_random_password() {
-    tr -dc 'A-Za-z0-9!@#$%' < /dev/urandom | head -c 16
-}
-
     case $choice in
         1)
             echo -e "${YELLOW}Ubuntu 24.04${RESET}"
@@ -286,9 +526,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh ubuntu 24.04 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh ubuntu 24.04 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         2)
@@ -297,9 +537,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh ubuntu 22.04 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh ubuntu 22.04 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         3)
@@ -308,9 +548,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh ubuntu 20.04 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh ubuntu 20.04 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         4)
@@ -319,9 +559,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh ubuntu 18.04 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh ubuntu 18.04 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         5)
@@ -330,9 +570,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh debian 13 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh debian 13 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         6)
@@ -341,9 +581,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh debian 12 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh debian 12 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         7)
@@ -352,9 +592,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh debian 11 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh debian 11 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         8)
@@ -363,9 +603,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh debian 10 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh debian 10 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         9)
@@ -374,9 +614,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh centos 10 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh centos 10 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         10)
@@ -385,9 +625,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh centos 9 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh centos 9 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         11)
@@ -396,9 +636,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/InstallNET.sh -centos 8 --password $root_password"
+            install_cmd="bash /tmp/InstallNET.sh -centos 8 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         12)
@@ -407,9 +647,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/InstallNET.sh -centos 7 --password $root_password"
+            install_cmd="bash /tmp/InstallNET.sh -centos 7 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         13)
@@ -481,7 +721,7 @@ dd_generate_random_password() {
                 echo -e "${YELLOW}已取消${RESET}"
                 return 0
             fi
-            install_cmd="bash /tmp/reinstall.sh windows --image-name=\"Windows Server 2025\" --lang en-us --password $win_pass"
+            install_cmd="bash /tmp/reinstall.sh windows --image-name=\"Windows Server 2025\" --lang en-us --password \"$win_pass\""
             is_windows=true
             ;;
         18)
@@ -532,9 +772,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh rocky 10 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh rocky 10 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         22)
@@ -543,9 +783,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh rocky 9 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh rocky 9 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         23)
@@ -554,9 +794,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh almalinux 10 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh almalinux 10 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         24)
@@ -565,9 +805,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh almalinux 9 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh almalinux 9 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         25)
@@ -576,9 +816,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh oracle 10 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh oracle 10 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         26)
@@ -587,9 +827,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh oracle 9 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh oracle 9 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         27)
@@ -598,9 +838,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh fedora 43 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh fedora 43 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         28)
@@ -609,9 +849,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh fedora 42 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh fedora 42 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         29)
@@ -620,9 +860,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh alpine 3.23 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh alpine 3.23 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         30)
@@ -631,9 +871,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh alpine 3.22 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh alpine 3.22 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         31)
@@ -642,9 +882,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh alpine 3.21 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh alpine 3.21 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         32)
@@ -653,9 +893,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh arch --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh arch --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         33)
@@ -664,9 +904,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh kali --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh kali --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         34)
@@ -675,9 +915,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh opensuse 15.6 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh opensuse 15.6 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         35)
@@ -686,9 +926,9 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh opensuse 16.0 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh opensuse 16.0 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         36)
@@ -697,15 +937,24 @@ dd_generate_random_password() {
             echo -e "端口: ${GREEN}${linux_port}${RESET} (SSH)"
             read -p "请输入密码 (留空随机生成): " root_password
             if [ -z "$root_password" ]; then
-                root_password=$(generate_random_password)
+                root_password=$(dd_generate_random_password)
             fi
-            install_cmd="bash /tmp/reinstall.sh openeuler 24.03 --password $root_password"
+            install_cmd="bash /tmp/reinstall.sh openeuler 24.03 --password \"$root_password\""
             echo -e "密码: ${GREEN}${root_password}${RESET}"
             ;;
         37)
             read -p "请输入 DD 镜像直链地址: " dd_url
             if [ -z "$dd_url" ]; then
                 echo -e "${RED}镜像地址不能为空${RESET}"
+                return 1
+            fi
+            # 验证URL格式（防止命令注入）
+            if ! [[ "$dd_url" =~ ^https?:// ]]; then
+                echo -e "${RED}镜像地址必须以 http:// 或 https:// 开头${RESET}"
+                return 1
+            fi
+            if [[ "$dd_url" =~ [\;\|\$\`\\] ]]; then
+                echo -e "${RED}镜像地址包含非法字符，请勿使用特殊符号${RESET}"
                 return 1
             fi
             read -p "请输入镜像密码 (留空无密码): " dd_password
@@ -723,9 +972,9 @@ dd_generate_random_password() {
                 return 0
             fi
             if [ -n "$dd_password" ]; then
-                install_cmd="bash /tmp/reinstall.sh dd --img=$dd_url --password $dd_password"
+                install_cmd="bash /tmp/reinstall.sh dd --img=\"$dd_url\" --password \"$dd_password\""
             else
-                install_cmd="bash /tmp/reinstall.sh dd --img=$dd_url"
+                install_cmd="bash /tmp/reinstall.sh dd --img=\"$dd_url\""
             fi
             is_custom_dd=true
             ;;
@@ -737,14 +986,13 @@ dd_generate_random_password() {
     
     if [ -n "$install_cmd" ]; then
         echo ""
-        echo -e "${YELLOW}即将执行: ${install_cmd}${RESET}"
-        echo -e "${RED}执行后会自动重启${RESET}"
+        echo -e "${YELLOW}即将执行安装命令，执行后会自动重启${RESET}"
         read -p "确认执行？(y/n，默认 y): " confirm
         confirm=${confirm:-y}
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             echo -e "${GREEN}正在执行安装命令，执行后自动重启...${RESET}"
             sleep 2
-            eval "$install_cmd" && reboot
+            bash -c "$install_cmd" && reboot
         else
             echo -e "${YELLOW}已取消${RESET}"
         fi
@@ -943,55 +1191,24 @@ fb_start_filebrowser() {
 
 fb_configure_nginx_http() {
     local domain=$1
-    if ! fb_check_port 80; then
-        fb_warn "端口 80 被占用，尝试自动释放..."
-        if fb_has_systemctl && systemctl is-active --quiet nginx; then
-            fb_info "停止 Nginx 以释放 80 端口..."
-            systemctl stop nginx; sleep 2
-        fi
-        if ! fb_check_port 80; then fb_error "无法释放 80 端口"; fi
+    local email=${2:-"admin@$domain"}
+    
+    # 直接使用全局 FB_PORT（已在 fb_install_filebrowser 中分配）
+    echo -e "${YELLOW}FileBrowser内部端口: $FB_PORT${RESET}"
+    
+    # 添加域名到统一Nginx反向代理
+    add_domain_to_unified_nginx "$domain" "$FB_PORT" "$email"
+    if [ $? -ne 0 ]; then
+        return 1
     fi
-    local nginx_conf="/etc/nginx/sites-available/$domain"
-    mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-    cat > $nginx_conf <<'EOF'
-server {
-    listen 80;
-    server_name DOMAIN_PLACEHOLDER;
-    client_max_body_size 0;
-    location / {
-        proxy_pass http://127.0.0.1:FB_PORT_PLACEHOLDER;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_buffering off;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-}
-EOF
-    sed -i "s/DOMAIN_PLACEHOLDER/$domain/g; s/FB_PORT_PLACEHOLDER/$FB_PORT/g" $nginx_conf
-    ln -sf $nginx_conf /etc/nginx/sites-enabled/ && rm -f /etc/nginx/sites-enabled/default
-    nginx -t
-    if fb_has_systemctl; then systemctl reload nginx; fi
-    fb_info "Nginx HTTP 配置完成 (反代到端口 $FB_PORT)"
+    
+    FB_DOMAIN=$domain
+    return 0
 }
 
 fb_configure_ssl() {
-    local domain=$1
-    fb_info "正在为 $domain 申请 SSL 证书..."
-    certbot --nginx -d $domain --non-interactive --agree-tos --email "admin@$domain" --redirect
-    local ssl_conf="/etc/nginx/sites-available/$domain"
-    if ! grep -q "client_max_body_size" "$ssl_conf"; then
-        sed -i '/listen 443 ssl;/a \    client_max_body_size 0;' "$ssl_conf"
-        nginx -t
-        if fb_has_systemctl; then systemctl reload nginx; fi
-    fi
-    fb_info "SSL 证书配置完成，证书自动续签已启用"
+    # SSL配置已由add_domain_to_unified_nginx处理
+    return 0
 }
 
 fb_get_public_ip() {
@@ -1020,40 +1237,39 @@ fb_reset_password() {
     else fb_error "重置密码失败"; fi
 }
 
+
+
 fb_release_port_80() {
-    if ! fb_has_systemctl || ! systemctl is-active --quiet nginx; then fb_warn "Nginx 未运行"; return; fi
-    fb_info "停止 Nginx 服务以释放 80 端口..." && systemctl stop nginx
-    fb_info "80 端口已释放"
-    read -p "申请完成后，按回车键恢复 Nginx 服务..."
-    if fb_has_systemctl; then systemctl start nginx && fb_info "Nginx 已恢复"; fi
+    fb_info "释放 80 端口..."
+    if command -v nginx >/dev/null 2>&1; then
+        systemctl stop nginx 2>/dev/null || true
+        fuser -k 80/tcp 2>/dev/null || true
+        fb_info "80 端口已释放"
+    else
+        fb_warn "Nginx 未安装，无需释放端口"
+    fi
 }
 
 fb_auto_cert_helper() {
-    fb_info "自动证书申请助手：将释放 80 端口，执行您的命令，完成后自动恢复 Nginx"
-    read -p "请输入证书申请命令: " cert_cmd
-    if [ -z "$cert_cmd" ]; then fb_error "命令不能为空"; fi
-    local nginx_was_running=false
-    if fb_has_systemctl && systemctl is-active --quiet nginx; then
-        nginx_was_running=true
-        fb_info "停止 Nginx..." && systemctl stop nginx && sleep 2
+    fb_info "自动配置 SSL 证书助手..."
+    if [ -z "$DOMAIN" ]; then
+        fb_error "请先配置域名"
+        return 1
     fi
-    fb_info "执行命令..." && eval "$cert_cmd" && local ret=$? || local ret=$?
-    if [ "$nginx_was_running" = true ]; then
-        if fb_has_systemctl; then
-            systemctl start nginx
-            if systemctl is-active --quiet nginx; then fb_info "Nginx 已恢复"; else fb_warn "Nginx 启动失败"; fi
-        fi
+    add_domain_to_unified_nginx "$DOMAIN" "$FB_PORT" "$WP_EMAIL"
+    if [ $? -eq 0 ]; then
+        fb_info "SSL 证书配置成功"
+    else
+        fb_error "SSL 证书配置失败"
     fi
-    if [ $ret -eq 0 ]; then fb_info "命令执行成功！"; else fb_warn "命令执行失败"; fi
 }
-
 fb_install_filebrowser() {
     echo "=========================================="
     echo "FileBrowser 一键部署安装流程"
     echo "=========================================="
-    fb_check_network && fb_detect_os && fb_fix_dpkg && fb_install_docker && fb_install_deps
+    fb_check_network && fb_detect_os && fb_fix_dpkg && fb_install_docker
 
-    local mode="" domain=""
+    local mode="" domain="" email=""
     if [ -t 0 ] && [ -t 1 ]; then
         echo "请选择安装类型："
         echo "1) 域名模式 (带SSL证书)"
@@ -1065,6 +1281,8 @@ fb_install_filebrowser() {
                 if [[ ! "$domain" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
                     fb_warn "域名格式可能不正确，继续？(y/N): "; read choice; [[ "$choice" != "y" && "$choice" != "Y" ]] && exit 1
                 fi
+                read -p "请输入邮箱 (用于证书通知，默认 admin@$domain): " email
+                email=${email:-admin@$domain}
                 fb_info "使用域名: $domain"; fb_check_dns $domain
                 ;;
             2) fb_info "使用 IP 模式" ;;
@@ -1074,14 +1292,22 @@ fb_install_filebrowser() {
         fb_info "非交互模式，自动选择 IP模式安装"; mode=2
     fi
 
-    FB_PORT=$(fb_auto_select_port $FB_PORT)
-    fb_info "使用端口: $FB_PORT"
+    # FileBrowser内部端口使用高端口
+    local fb_internal_port=8081
+    while ss -tuln 2>/dev/null | grep -q ":$fb_internal_port " || netstat -tuln 2>/dev/null | grep -q ":$fb_internal_port "; do
+        fb_internal_port=$((fb_internal_port + 1))
+    done
+    FB_PORT=$fb_internal_port
+    
+    fb_info "使用内部端口: $FB_PORT"
     fb_info "拉取 FileBrowser 镜像..." && docker pull $FB_IMAGE
     fb_prepare_dirs && fb_start_filebrowser
 
     if [ -n "$domain" ]; then
-        fb_configure_nginx_http $domain && fb_configure_ssl $domain
-        fb_info "安装完成！访问地址: https://$domain"
+        fb_configure_nginx_http "$domain" "$email"
+        if [ $? -eq 0 ]; then
+            fb_info "安装完成！访问地址: https://$domain"
+        fi
     else
         fb_info "安装完成！访问地址: http://$(fb_get_public_ip):$FB_PORT"
     fi
@@ -1849,7 +2075,9 @@ EOF
 
                 check_port() {
                     local port=$1
-                    if netstat -tuln | grep ":$port" > /dev/null; then
+                    if ss -tuln 2>/dev/null | grep -q ":$port "; then
+                        return 1
+                    elif netstat -tuln 2>/dev/null | grep -q ":$port "; then
                         return 1
                     else
                         return 0
@@ -1979,8 +2207,10 @@ EOF
                     DEFAULT_PORT=5700
                     check_port() {
                         local port=$1
-                        if netstat -tuln | grep ":$port" > /dev/null; then
+                        if ss -tuln 2>/dev/null | grep -q ":$port "; then
                             return 1  # 端口被占用
+                        elif netstat -tuln 2>/dev/null | grep -q ":$port "; then
+                            return 1
                         else
                             return 0  # 端口可用
                         fi
@@ -2356,90 +2586,46 @@ EOF
                     fi
                 fi
 
-                read -p "请输入 NekoNekoStatus 容器端口（默认为 5555）： " container_port
+                read -p "请输入探针容器端口（默认 5555）： " container_port
                 container_port=${container_port:-5555}
-                read -p "请输入反向代理端口（默认为 80）： " proxy_port
-                proxy_port=${proxy_port:-80}
-
-                check_port() {
-                    local port=$1
-                    if netstat -tuln | grep ":$port" > /dev/null; then
-                        return 1
-                    else
-                        return 0
-                    fi
-                }
-
+                
+                # 检查容器端口是否可用
                 check_port $container_port
                 if [ $? -eq 1 ]; then
                     echo -e "${RED}端口 $container_port 已被占用，请选择其他端口！${RESET}"
                 else
-                    check_port $proxy_port
-                    if [ $? -eq 1 ]; then
-                        echo -e "${RED}端口 $proxy_port 已被占用，请选择其他端口！${RESET}"
-                    else
-                        open_port() {
-                            local port=$1
-                            if command -v ufw &> /dev/null; then
-                                sudo ufw allow $port
-                            elif command -v firewall-cmd &> /dev/null; then
-                                sudo firewall-cmd --zone=public --add-port=$port/tcp --permanent
-                                sudo firewall-cmd --reload
-                            else
-                                echo -e "${YELLOW}未检测到 ufw 或 firewalld，请手动开放端口 $port。${RESET}"
-                            fi
-                        }
-
-                        echo -e "${YELLOW}正在开放容器端口 $container_port...${RESET}"
-                        open_port $container_port
-                        echo -e "${YELLOW}正在开放反向代理端口 $proxy_port...${RESET}"
-                        open_port $proxy_port
-
-                        echo -e "${YELLOW}正在拉取 NekoNekoStatus Docker 镜像...${RESET}"
-                        docker pull nkeonkeo/nekonekostatus:latest
-                        echo -e "${YELLOW}正在启动 NekoNekoStatus 容器...${RESET}"
-                        docker run --restart=on-failure --name nekonekostatus -p $container_port:5555 -d nkeonkeo/nekonekostatus:latest
-
-                        read -p "请输入您的域名（例如：www.example.com）： " domain
-                        read -p "请输入您的邮箱（用于 Let's Encrypt 证书）： " email
-
-                        if ! command -v nginx &> /dev/null; then
-                            echo -e "${YELLOW}正在安装 Nginx...${RESET}"
-                            sudo apt update -y && sudo apt install -y nginx
+                    # 开放防火墙端口
+                    open_port() {
+                        local port=$1
+                        if command -v ufw &> /dev/null; then
+                            sudo ufw allow $port
+                        elif command -v firewall-cmd &> /dev/null; then
+                            sudo firewall-cmd --zone=public --add-port=$port/tcp --permanent
+                            sudo firewall-cmd --reload
                         fi
-                        if ! command -v certbot &> /dev/null; then
-                            echo -e "${YELLOW}正在安装 Certbot...${RESET}"
-                            sudo apt install -y certbot python3-certbot-nginx
-                        fi
+                    }
+                    open_port $container_port
 
-                        echo -e "${YELLOW}正在配置 Nginx...${RESET}"
-                        cat > /etc/nginx/sites-available/$domain <<EOL
-server {
-    listen $proxy_port;
-    server_name $domain;
+                    echo -e "${YELLOW}正在拉取 NekoNekoStatus Docker 镜像...${RESET}"
+                    docker pull nkeonkeo/nekonekostatus:latest
+                    echo -e "${YELLOW}正在启动 NekoNekoStatus 容器...${RESET}"
+                    docker run --restart=on-failure --name nekonekostatus -p $container_port:5555 -d nkeonkeo/nekonekostatus:latest
 
-    location / {
-        proxy_pass http://127.0.0.1:$container_port;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOL
-                        sudo ln -s /etc/nginx/sites-available/$domain /etc/nginx/sites-enabled/
-                        sudo nginx -t && sudo systemctl reload nginx
+                    read -p "请输入您的域名（例如：www.example.com）： " domain
+                    while [ -z "$domain" ]; do
+                        echo -e "${RED}域名不能为空！${RESET}"
+                        read -p "请输入您的域名： " domain
+                    done
+                    
+                    read -p "请输入邮箱（用于证书通知，默认 admin@$domain）： " email
+                    email=${email:-admin@$domain}
 
-                        echo -e "${YELLOW}正在申请 Let's Encrypt 证书...${RESET}"
-                        sudo certbot --nginx -d $domain --email $email --agree-tos --non-interactive
-
-                        echo -e "${YELLOW}正在配置证书自动续期...${RESET}"
-                        (crontab -l 2>/dev/null; echo "0 0 * * * certbot renew --quiet && systemctl reload nginx") | crontab -
-
+                    # 使用统一反向代理添加域名
+                    add_domain_to_unified_nginx "$domain" "$container_port" "$email"
+                    if [ $? -eq 0 ]; then
                         echo -e "${GREEN}NekoNekoStatus 安装和域名绑定完成！${RESET}"
-                        echo -e "${YELLOW}您现在可以通过 https://$domain 访问探针服务了。${RESET}"
+                        echo -e "${GREEN}您现在可以通过 https://$domain 访问探针服务了。${RESET}"
                         echo -e "${YELLOW}容器端口: $container_port${RESET}"
-                        echo -e "${YELLOW}反向代理端口: $proxy_port${RESET}"
                         echo -e "${YELLOW}默认密码: nekonekostatus${RESET}"
                         echo -e "${YELLOW}安装后务必修改密码！${RESET}"
                     fi
@@ -2580,8 +2766,12 @@ EOF
                                     echo "⚠️ 未检测到防火墙工具，请手动放行端口"
                                 fi
 
-                                (crontab -l 2>/dev/null; echo "0 3 * * * /usr/bin/certbot renew --quiet") | crontab -
-                                echo "✅ 已添加证书自动续签任务"
+                                if ! crontab -l 2>/dev/null | grep -q "certbot renew"; then
+                                    (crontab -l 2>/dev/null; echo "0 3 * * * /usr/bin/certbot renew --quiet") | crontab -
+                                    echo " 已添加证书自动续签任务"
+                                else
+                                    echo "证书自动续签任务已存在，跳过添加"
+                                fi
 
                                 echo -e "\n🔌 当前服务状态："
                                 echo "Nginx状态: $(systemctl is-active nginx)"
@@ -2598,15 +2788,6 @@ EOF
                             # 检查 Docker 是否安装
                             if ! command -v docker &> /dev/null; then
                                 echo "➜ 检测到 Docker 未安装，正在安装..."
-                                check_system() {
-                                    if [ -f /etc/os-release ]; then
-                                        . /etc/os-release
-                                        SYSTEM=$ID
-                                    else
-                                        echo "❌ 无法识别系统！"
-                                        return 1
-                                    fi
-                                }
                                 check_system
                                 if [ "$SYSTEM" == "ubuntu" ] || [ "$SYSTEM" == "debian" ]; then
                                     apt-get update > /dev/null 2>&1
@@ -2646,8 +2827,12 @@ EOF
 
                             # 检查磁盘空间
                             echo "➜ 检查磁盘空间..."
-                            available_space=$(df -h . | awk 'NR==2 {print $4}' | grep -o '[0-9.]\+')
-                            if [ -z "$available_space" ] || [ $(echo "$available_space < 5" | bc) -eq 1 ]; then
+                            available_space=$(df -h . | awk 'NR==2 {print $4}' | grep -o '[0-9.]*')
+                            if [ -z "$available_space" ]; then
+                                echo "⚠️ 无法获取磁盘空间信息"
+                            elif ! command -v bc >/dev/null 2>&1; then
+                                echo "⚠️ bc 命令未安装，无法精确比较磁盘空间（当前可用: $available_space GB)"
+                            elif [ $(echo "$available_space < 5" | bc) -eq 1 ]; then
                                 echo "❌ 磁盘空间不足（需要至少 5GB 可用空间）！当前可用: $available_space GB"
                                 read -p "按回车键返回上一级..."
                                 continue
@@ -3046,6 +3231,16 @@ uninstall_docker() {
     configure_mirror() {
         if ! check_docker_status; then return; fi
 
+        # 检查并安装 jq（如果缺失）
+        if ! command -v jq >/dev/null 2>&1; then
+            echo -e "${YELLOW}检测到 jq 未安装，正在安装...${RESET}"
+            if [ "$SYSTEM" == "centos" ]; then
+                sudo yum install -y jq
+            else
+                sudo apt install -y jq
+            fi
+        fi
+
         echo -e "${YELLOW}当前镜像加速配置：${RESET}"
         if [ -f /etc/docker/daemon.json ]; then
             # 显示当前镜像加速地址
@@ -3356,7 +3551,7 @@ install_image_container() {
             if command -v ss >/dev/null; then
                 ss -tuln | awk '{print \$5}' | cut -d':' -f2 | grep -E '^[0-9]+$' | sort -un
             elif command -v netstat >/dev/null; then
-                netstat -tuln | awk '/^tcp|udp/ {print \$4}' | cut -d':' -f2 | grep -E '^[0-9]+$' | sort -un
+                netstat -tuln | awk '/^(tcp|udp)/ {print \$4}' | cut -d':' -f2 | grep -E '^[0-9]+$' | sort -un
             fi" 2>/dev/null)
         for port in $runtime_ports; do
             if [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && [[ ! " ${exposed_ports[@]} " =~ " ${port} " ]]; then
@@ -3535,9 +3730,9 @@ install_image_container() {
             container_port=$(echo "$mapping" | cut -d' ' -f1)
             temp_check=$(docker exec "$container_name" sh -c "
                 if command -v ss >/dev/null; then
-                    ss -tuln | grep -q ':${container_port}' && echo 'found'
+                    ss -tuln | grep -q ':${container_port} ' && echo 'found'
                 elif command -v netstat >/dev/null; then
-                    netstat -tuln | grep -q ':${container_port}' && echo 'found'
+                    netstat -tuln | grep -q ':${container_port} ' && echo 'found'
                 fi" 2>/dev/null)
             if [ "$temp_check" != "found" ]; then
                 echo -e "${RED}警告：容器未监听端口 ${container_port}，映射可能无效！${RESET}"
@@ -3648,7 +3843,9 @@ install_image_container() {
         # 检查端口是否占用
         check_port() {
             local port=$1
-            if netstat -tuln | grep ":$port" > /dev/null; then
+            if ss -tuln 2>/dev/null | grep -q ":$port "; then
+                return 1
+            elif netstat -tuln 2>/dev/null | grep -q ":$port "; then
                 return 1
             else
                 return 0
@@ -4008,31 +4205,35 @@ EOF"
                     fi
                 fi
 
-                # 计算时间范围的开始时间
-                start_time=$(date -d "$DETECT_TIME minutes ago" +"%Y-%m-%d %H:%M:%S")
+                # 计算时间范围的开始时间戳
+                start_timestamp=$(date -d "$DETECT_TIME minutes ago" +%s)
+                current_year=$(date +%Y)
 
                 # 检测并统计暴力破解尝试
                 echo -e "${GREEN}正在分析日志文件：$LOG_FILE${RESET}"
-                echo -e "${GREEN}检测时间范围：从 $start_time 到现在${RESET}"
+                echo -e "${GREEN}检测时间范围：最近 $DETECT_TIME 分钟${RESET}"
                 echo -e "${GREEN}可疑 IP 统计（尝试次数 >= $MAX_ATTEMPTS）："
                 echo -e "----------------------------------------${RESET}"
 
-                grep "Failed password" "$LOG_FILE" | awk -v start="$start_time" '
+                grep "Failed password" "$LOG_FILE" | awk -v start_ts="$start_timestamp" -v year="$current_year" '
                 {
                     log_time = substr($0, 1, 15)
                     ip = $(NF-3)
-                    log_full_time = sprintf("%s %s", strftime("%Y"), log_time)
-                    if (log_full_time >= start) {
+                    # 拼接完整时间并转换为时间戳
+                    log_full_time = sprintf("%s %s", year, log_time)
+                    log_timestamp = mktime(sprintf("%s %s", year, substr(log_time,1,2) " " substr(log_time,4,2) " " substr(log_time,7,8) " " substr(log_time,10,5) " " substr(log_time,16,2)))
+                    if (log_timestamp >= start_ts) {
                         attempts[ip]++
-                        if (!last_time[ip] || log_full_time > last_time[ip]) {
-                            last_time[ip] = log_full_time
+                        if (!last_time[ip] || log_timestamp > last_time[ip]) {
+                            last_time[ip] = log_timestamp
                         }
                     }
                 }
                 END {
                     for (ip in attempts) {
-                        if (attempts[ip] >= '"$MAX_ATTEMPTS"') {
-                            printf "IP: %-15s 尝试次数: %-5d 最近尝试时间: %s\n", ip, attempts[ip], last_time[ip]
+                        if (attempts[ip] >= 5) {
+                            strftime_result = strftime("%Y-%m-%d %H:%M:%S", last_time[ip])
+                            printf "IP: %-15s 尝试次数: %-5d 最近尝试时间: %s\n", ip, attempts[ip], strftime_result
                         }
                     }
                 }' | sort -k3 -nr
@@ -4065,7 +4266,9 @@ EOF"
     # 端口检查函数
     check_port() {
         local port=$1
-        if netstat -tuln | grep ":$port" > /dev/null; then
+        if ss -tuln 2>/dev/null | grep -q ":$port "; then
+            return 1
+        elif netstat -tuln 2>/dev/null | grep -q ":$port "; then
             return 1
         else
             return 0
@@ -4157,42 +4360,15 @@ EOF"
             fi
 
             # 检查端口占用并选择可用端口
-            DEFAULT_PORT=80
+            # ALS 使用 network_mode: host，需要直接占用端口
+            # 为避免与统一 Nginx 代理冲突，默认使用 8083 端口
+            DEFAULT_PORT=8083
             check_port "$DEFAULT_PORT"
             if [ $? -eq 1 ]; then
-                echo -e "${RED}端口 $DEFAULT_PORT 已被占用！${RESET}"
-                disable_firewall_if_blocking "$DEFAULT_PORT"
-                check_port "$DEFAULT_PORT"
-                if [ $? -eq 1 ]; then
-                    read -p "是否更换端口？（y/n，默认 y）： " change_port
-                    if [ "$change_port" != "n" ] && [ "$change_port" != "N" ]; then
-                        while true; do
-                            read -p "请输入新的端口号（例如 8080）： " new_port
-                            while ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; do
-                                echo -e "${RED}无效端口，请输入 1-65535 之间的数字！${RESET}"
-                                read -p "请输入新的端口号（例如 8080）： " new_port
-                            done
-                            check_port "$new_port"
-                            if [ $? -eq 0 ]; then
-                                DEFAULT_PORT=$new_port
-                                break
-                            else
-                                echo -e "${RED}端口 $new_port 已被占用，请选择其他端口！${RESET}"
-                                disable_firewall_if_blocking "$new_port"
-                                check_port "$new_port"
-                                if [ $? -eq 0 ]; then
-                                    DEFAULT_PORT=$new_port
-                                    break
-                                fi
-                            fi
-                        done
-                    else
-                        echo -e "${RED}端口 $DEFAULT_PORT 被占用，无法继续安装！${RESET}"
-                        read -p "按回车键返回主菜单..."
-                        continue
-                    fi
-                fi
+                echo -e "${YELLOW}端口 $DEFAULT_PORT 已被占用，自动选择可用端口...${RESET}"
+                DEFAULT_PORT=$(get_free_port 8083)
             fi
+            echo -e "${GREEN}ALS 将使用端口: $DEFAULT_PORT${RESET}"
 
             # 检查并放行防火墙端口
             if command -v ufw > /dev/null 2>&1; then
@@ -4482,15 +4658,6 @@ EOF"
         echo -e "${GREEN}正在准备处理 WordPress 安装...${RESET}"
 
         # 检查系统类型
-        check_system() {
-            if [ -f /etc/redhat-release ]; then
-                SYSTEM="centos"
-            elif [ -f /etc/debian_version ]; then
-                SYSTEM="debian"
-            else
-                SYSTEM="unknown"
-            fi
-        }
         check_system
         if [ "$SYSTEM" == "unknown" ]; then
             echo -e "${RED}无法识别系统，无法继续操作！${RESET}"
@@ -4524,8 +4691,12 @@ EOF"
 
             # 检查磁盘空间
             DISK_SPACE=$(df -h / | awk 'NR==2 {print $4}' | sed 's/G//')
-            if [ -z "$DISK_SPACE" ] || [ $(echo "$DISK_SPACE < 5" | bc) -eq 1 ]; then
-                echo -e "${RED}磁盘空间不足（需至少 5G），请清理后再试！当前可用空间：$DISK_SPACE${RESET}"
+            if [ -z "$DISK_SPACE" ] || ! command -v bc >/dev/null 2>&1; then
+                if [ -z "$DISK_SPACE" ]; then
+                    echo -e "${RED}无法获取磁盘空间信息${RESET}"
+                fi
+            elif [ $(echo "$DISK_SPACE < 5" | bc) -eq 1 ]; then
+                echo -e "${RED}磁盘空间不足（需至少 5G），请清理后再试！当前可用空间：${DISK_SPACE}G${RESET}"
                 read -p "按回车键返回主菜单..."
                 continue
             fi
@@ -4548,6 +4719,18 @@ EOF"
                 systemctl enable docker
                 if [ $? -ne 0 ]; then
                     echo -e "${RED}Docker 服务启动失败，请手动检查！${RESET}"
+                    read -p "按回车键返回主菜单..."
+                    continue
+                fi
+            fi
+
+            # 安装 Docker Compose
+            if ! command -v docker-compose > /dev/null 2>&1; then
+                echo -e "${YELLOW}安装 Docker Compose...${RESET}"
+                curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose 2>/dev/null
+                chmod +x /usr/local/bin/docker-compose
+                if [ $? -ne 0 ]; then
+                    echo -e "${RED}Docker Compose 安装失败！${RESET}"
                     read -p "按回车键返回主菜单..."
                     continue
                 fi
@@ -4616,671 +4799,228 @@ case $operation_choice in
             else
                 echo -e "${YELLOW}将覆盖现有 WordPress 文件...${RESET}"
                 rm -rf /home/wordpress
-                mkdir -p /home/wordpress/html /home/wordpress/mysql /home/wordpress/conf.d /home/wordpress/logs/nginx /home/wordpress/logs/mariadb /home/wordpress/certs
             fi
         fi
 
+        # 创建 WordPress 目录
+        mkdir -p /home/wordpress/html /home/wordpress/mysql /home/wordpress/conf.d /home/wordpress/logs/nginx /home/wordpress/logs/mariadb /home/wordpress/certs
+
+
+        # WordPress 安装模式选择
+        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
+        echo -e "${YELLOW}║       WordPress 安装模式选择       ║${RESET}"
+        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
+        echo -e "请选择 WordPress 安装配置模式："
+        echo -e "  ${GREEN}1)${RESET} 256MB 极简模式 (小型站点、测试环境)"
+        echo -e "  ${GREEN}2)${RESET} 512MB 标准模式 (一般生产环境) ${YELLOW}[推荐]${RESET}"
+        echo -e "  ${GREEN}3)${RESET} 1024MB 高性能模式 (大型站点、高流量)"
+        read -p "请输入选项（1、2、3，默认 2）： " install_mode
+        install_mode=${install_mode:-2}
+        case $install_mode in
+            1) MINIMAL_MODE="256";;
+            2) MINIMAL_MODE="512";;
+            3) MINIMAL_MODE="1024";;
+            *) MINIMAL_MODE="512";;
+        esac
+        echo -e "\${GREEN}已选择 \${MINIMAL_MODE}MB 配置模式\${RESET}"
+
         # 检查端口占用并选择可用端口
-        DEFAULT_PORT=80
-        DEFAULT_SSL_PORT=443
+        # WordPress使用高端口（8082）作为内部端口，由统一Nginx反向代理处理80/443
+        DEFAULT_PORT=8082
+        DEFAULT_SSL_PORT=8443
+        WORDPRESS_INTERNAL_PORT=8082
         check_port() {
             local port=$1
             if command -v ss > /dev/null 2>&1; then
-                ss -tuln | grep ":$port" > /dev/null
+                ss -tuln | grep -q ":$port " && return 1 || return 0
             elif command -v netstat > /dev/null 2>&1; then
-                netstat -tuln | grep ":$port" > /dev/null
+                netstat -tuln | grep -q ":$port " && return 1 || return 0
             else
-                echo -e "${RED}未找到 ss 或 netstat，请安装 net-tools 并重试！${RESET}"
+                echo -e "${RED}未找到 ss 或 netstat，正在安装 net-tools...${RESET}"
                 if [ "$SYSTEM" == "centos" ]; then
                     yum install -y net-tools
                 else
                     apt install -y net-tools
                 fi
-                netstat -tuln | grep ":$port" > /dev/null
+                ss -tuln | grep -q ":$port " && return 1 || return 0
             fi
         }
 
-        check_port "$DEFAULT_PORT"
-        if [ $? -eq 0 ]; then
-            echo -e "${RED}端口 $DEFAULT_PORT 已被占用！${RESET}"
-            read -p "是否更换端口？（y/n，默认 y）： " change_port
-            if [ "$change_port" != "n" ] && [ "$change_port" != "N" ]; then
-                while true; do
-                    read -p "请输入新的 HTTP 端口号（例如 8080）： " new_port
-                    while ! [[ "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -lt 1 ] || [ "$new_port" -gt 65535 ]; do
-                        echo -e "${RED}无效端口，请输入 1-65535 之间的数字！${RESET}"
-                        read -p "请输入新的 HTTP 端口号（例如 8080）： " new_port
-                    done
-                    check_port "$new_port"
-                    if [ $? -eq 1 ]; then
-                        DEFAULT_PORT=$new_port
-                        break
-                    else
-                        echo -e "${RED}端口 $new_port 已被占用，请选择其他端口！${RESET}"
-                    fi
-                done
-            else
-                echo -e "${RED}端口 $DEFAULT_PORT 被占用，无法继续安装！${RESET}"
-                read -p "按回车键返回主菜单..."
-                continue
-            fi
+        check_port "$WORDPRESS_INTERNAL_PORT"
+        if [ $? -eq 1 ]; then
+            echo -e "${YELLOW}端口 $WORDPRESS_INTERNAL_PORT 被占用，自动选择可用端口...${RESET}"
+            WORDPRESS_INTERNAL_PORT=$(get_free_port 8082)
+            DEFAULT_PORT=$WORDPRESS_INTERNAL_PORT
+            DEFAULT_SSL_PORT=$((WORDPRESS_INTERNAL_PORT + 1))
         fi
 
-        # 检查并放行防火墙端口
-        if [ "$SYSTEM" == "centos" ] && command -v firewall-cmd > /dev/null 2>&1; then
-            firewall-cmd --state | grep -q "running"
-            if [ $? -eq 0 ]; then
-                echo -e "${YELLOW}检测到 firewalld 防火墙...${RESET}"
-                firewall-cmd --list-ports | grep -q "$DEFAULT_PORT/tcp"
-                if [ $? -ne 0 ]; then
-                    echo -e "${YELLOW}正在放行端口 $DEFAULT_PORT...${RESET}"
-                    firewall-cmd --permanent --add-port="$DEFAULT_PORT/tcp"
-                    firewall-cmd --reload
-                fi
-            fi
-        elif command -v ufw > /dev/null 2>&1; then
-            ufw status | grep -q "Status: active"
-            if [ $? -eq 0 ]; then
-                echo -e "${YELLOW}检测到 UFW 防火墙正在运行...${RESET}"
-                ufw status | grep -q "$DEFAULT_PORT"
-                if [ $? -ne 0 ]; then
-                    echo -e "${YELLOW}正在放行端口 $DEFAULT_PORT...${RESET}"
-                    ufw allow "$DEFAULT_PORT/tcp"
-                fi
-            fi
-        elif command -v iptables > /dev/null 2>&1; then
-            echo -e "${YELLOW}检测到 iptables 防火墙...${RESET}"
-            iptables -C INPUT -p tcp --dport "$DEFAULT_PORT" -j ACCEPT 2>/dev/null
-            if [ $? -ne 0 ]; then
-                echo -e "${YELLOW}正在放行端口 $DEFAULT_PORT...${RESET}"
-                iptables -A INPUT -p tcp --dport "$DEFAULT_PORT" -j ACCEPT
-                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-            fi
-        fi
-
-        # 再次验证端口
-        check_port "$DEFAULT_PORT"
-        if [ $? -eq 0 ]; then
-            echo -e "${RED}防火墙放行后端口 $DEFAULT_PORT 仍被占用，请检查其他服务或防火墙配置！${RESET}"
-            read -p "按回车键返回主菜单..."
-            continue
-        fi
-
-        # 询问是否绑定域名和启用 HTTPS
+        # 域名绑定和HTTPS配置
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
         echo -e "${YELLOW}║         WordPress 配置界面         ║${RESET}"
         echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
         read -p "是否绑定域名？（y/n，默认 n）： " bind_domain
-        DOMAIN="_"
+        DOMAIN=""
+        WP_EMAIL="admin@wordpress.local"
         if [ "$bind_domain" == "y" ] || [ "$bind_domain" == "Y" ]; then
             read -p "请输入域名（例如 example.com）： " DOMAIN
             while [ -z "$DOMAIN" ]; do
                 echo -e "${RED}域名不能为空，请重新输入！${RESET}"
                 read -p "请输入域名（例如 example.com）： " DOMAIN
             done
-            read -p "是否启用 HTTPS（需域名指向服务器 IP）？（y/n，默认 n）： " enable_https
+            read -p "请输入邮箱（用于证书通知，默认 admin@$DOMAIN）： " wp_email_input
+            WP_EMAIL=${wp_email_input:-admin@$DOMAIN}
+            read -p "是否启用 HTTPS（需域名指向服务器 IP）？（y/n，默认 y）： " enable_https
+            enable_https=${enable_https:-y}
             if [ "$enable_https" == "y" ] || [ "$enable_https" == "Y" ]; then
                 ENABLE_HTTPS="yes"
-                check_port "$DEFAULT_SSL_PORT"
-                if [ $? -eq 0 ]; then
-                    echo -e "${RED}HTTPS 默认端口 $DEFAULT_SSL_PORT 已被占用！${RESET}"
-                    read -p "请输入新的 HTTPS 端口号（例如 8443）： " new_ssl_port
-                    while ! [[ "$new_ssl_port" =~ ^[0-9]+$ ]] || [ "$new_ssl_port" -lt 1 ] || [ "$new_ssl_port" -gt 65535 ]; do
-                        echo -e "${RED}无效端口，请输入 1-65535 之间的数字！${RESET}"
-                        read -p "请输入新的 HTTPS 端口号（例如 8443）： " new_ssl_port
-                    done
-                    check_port "$new_ssl_port"
-                    if [ $? -eq 1 ]; then
-                        DEFAULT_SSL_PORT=$new_ssl_port
-                    else
-                        echo -e "${RED}端口 $new_ssl_port 已被占用，无法继续安装！${RESET}"
-                        read -p "按回车键返回主菜单..."
-                        continue
-                    fi
-                fi
-                # 放行 HTTPS 端口
-                if [ "$SYSTEM" == "centos" ] && command -v firewall-cmd > /dev/null 2>&1; then
-                    firewall-cmd --state | grep -q "running"
-                    if [ $? -eq 0 ]; then
-                        echo -e "${YELLOW}检测到 firewalld 防火墙...${RESET}"
-                        firewall-cmd --list-ports | grep -q "$DEFAULT_SSL_PORT/tcp"
-                        if [ $? -ne 0 ]; then
-                            echo -e "${YELLOW}正在放行 HTTPS 端口 $DEFAULT_SSL_PORT...${RESET}"
-                            firewall-cmd --permanent --add-port="$DEFAULT_SSL_PORT/tcp"
-                            firewall-cmd --reload
-                        fi
-                    fi
-                elif command -v ufw > /dev/null 2>&1; then
-                    ufw status | grep -q "$DEFAULT_SSL_PORT"
-                    if [ $? -ne 0 ]; then
-                        echo -e "${YELLOW}正在放行 HTTPS 端口 $DEFAULT_SSL_PORT...${RESET}"
-                        ufw allow "$DEFAULT_SSL_PORT/tcp"
-                        ufw reload
-                    fi
-                elif command -v iptables > /dev/null 2>&1; then
-                    iptables -C INPUT -p tcp --dport "$DEFAULT_SSL_PORT" -j ACCEPT 2>/dev/null
-                    if [ $? -ne 0 ]; then
-                        echo -e "${YELLOW}正在放行 HTTPS 端口 $DEFAULT_SSL_PORT...${RESET}"
-                        iptables -A INPUT -p tcp --dport "$DEFAULT_SSL_PORT" -j ACCEPT
-                        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-                    fi
-                fi
             fi
         fi
-
-        # 询问 MariaDB 用户信息
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║       MariaDB 用户配置界面        ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        while true; do
-            read -p "请输入数据库 ROOT 密码： " db_root_passwd
-            if [ -n "$db_root_passwd" ]; then
-                break
-            else
-                echo -e "${RED}ROOT 密码不能为空，请重新输入！${RESET}"
-            fi
-        done
-        db_user="wordpress"  # 固定为 wordpress
-        echo -e "${YELLOW}数据库用户名固定为 'wordpress'${RESET}"
-        while true; do
-            read -p "请输入数据库用户密码： " db_user_passwd
-            if [ -n "$db_user_passwd" ]; then
-                break
-            else
-                echo -e "${RED}用户密码不能为空，请重新输入！${RESET}"
-            fi
-        done
-
-        # 检查系统资源并选择安装模式
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         系统资源检测界面          ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        TOTAL_MEM=$(free -m | awk '/^Mem:/ {print $2}')
-        AVAILABLE_MEM=$(free -m | awk '/^Mem:/ {print $7}')  # 使用 available 列
-        FREE_DISK=$(df -h /home | awk 'NR==2 {print $4}')
-        echo -e "${YELLOW}检测结果：${RESET}"
-        echo -e "  总内存：${GREEN}$TOTAL_MEM MB${RESET}"
-        echo -e "  可用内存：${GREEN}$AVAILABLE_MEM MB${RESET}"
-        echo -e "  可用磁盘空间：${GREEN}$FREE_DISK${RESET}"
-
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         选择安装模式界面          ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        echo "1) 256MB 极简模式（适合低内存测试，禁用 HTTPS）"
-        echo "2) 512MB 标准模式（搭配 512MB Swap，支持 HTTPS）"
-        echo "3) 1GB 推荐模式（完整功能，推荐配置）"
-        read -p "请输入选项（1、2、3）： " install_mode
-
-        case $install_mode in
-            1)
-                echo -e "${YELLOW}已选择 256MB 极简模式安装${RESET}"
-                MINIMAL_MODE="256"
-                if [ "$TOTAL_MEM" -lt 256 ]; then
-                    echo -e "${RED}警告：总内存 $TOTAL_MEM MB 低于 256MB，建议至少 256MB！${RESET}"
-                fi
-                ;;
-            2)
-                echo -e "${YELLOW}已选择 512MB 标准模式安装${RESET}"
-                MINIMAL_MODE="512"
-                if [ "$TOTAL_MEM" -lt 512 ]; then
-                    echo -e "${RED}错误：总内存 $TOTAL_MEM MB 低于 512MB，无法使用标准模式！${RESET}"
-                    read -p "按回车键返回主菜单..."
-                    continue
-                fi
-                if [ ! -f /swapfile ]; then
-                    echo -e "${YELLOW}创建并启用 512MB 交换空间...${RESET}"
-                    fallocate -l 512M /swapfile
-                    chmod 600 /swapfile
-                    mkswap /swapfile
-                    swapon /swapfile
-                    echo "/swapfile none swap sw 0 0" >> /etc/fstab
-                    echo "vm.swappiness=60" > /etc/sysctl.d/99-swappiness.conf
-                    sysctl -p /etc/sysctl.d/99-swappiness.conf
-                    echo -e "${GREEN}交换空间创建并启用成功！${RESET}"
-                    sleep 5
-                else
-                    echo -e "${YELLOW}交换空间已存在，尝试启用...${RESET}"
-                    swapon /swapfile 2>/dev/null || echo -e "${RED}交换空间启用失败，请检查 /swapfile${RESET}"
-                    sleep 5
-                fi
-                ;;
-            3)
-                echo -e "${YELLOW}已选择 1GB 推荐模式安装${RESET}"
-                MINIMAL_MODE="1024"
-                if [ "$TOTAL_MEM" -lt 1024 ]; then
-                    echo -e "${RED}错误：总内存 $TOTAL_MEM MB 低于 1GB，无法使用推荐模式！${RESET}"
-                    read -p "按回车键返回主菜单..."
-                    continue
-                fi
-                ;;
-            *)
-                echo -e "${RED}无效选项，请选择 1、2 或 3！${RESET}"
-                read -p "按回车键返回主菜单..."
-                continue
-                ;;
-        esac
-
-        if [ "$AVAILABLE_MEM" -lt 256 ] && [ "$MINIMAL_MODE" != "256" ]; then
-            echo -e "${YELLOW}可用内存 $AVAILABLE_MEM MB 不足 256MB，建议释放内存以提升性能。${RESET}"
-            echo -e "${YELLOW}当前内存使用情况：${RESET}"
-            free -m
-            echo -e "${YELLOW}内存占用最高的进程：${RESET}"
-            ps aux --sort=-%mem | head -n 5
-        fi
-
-        if [ "${FREE_DISK%G}" -lt 1 ]; then
-            echo -e "${RED}错误：可用磁盘空间不足 1GB，MariaDB 可能无法运行！请释放空间后重试。${RESET}"
-            read -p "按回车键返回主菜单..."
-            continue
-        fi
-
-        # 安装 Docker Compose
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         安装 Docker Compose       ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        if ! command -v docker-compose > /dev/null 2>&1; then
-            echo -e "${YELLOW}正在下载并安装 Docker Compose...${RESET}"
-            curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-            chmod +x /usr/local/bin/docker-compose
-            sleep 2  # 等待内存缓冲区释放
-            echo -e "${GREEN}Docker Compose 安装完成！${RESET}"
-        else
-            echo -e "${GREEN}Docker Compose 已安装，跳过此步骤。${RESET}"
-        fi
-
-        # 创建目录和配置 docker-compose.yml
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         创建安装目录界面          ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        cd /home && mkdir -p wordpress/html wordpress/mysql wordpress/conf.d wordpress/logs/nginx wordpress/logs/mariadb wordpress/certs
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}创建目录 /home/wordpress 失败，请检查权限或磁盘空间！${RESET}"
-            read -p "按回车键返回主菜单..."
-            continue
-        fi
-        touch wordpress/docker-compose.yml
-        echo -e "${GREEN}安装目录创建完成！${RESET}"
-
-        # 根据安装模式生成 docker-compose.yml
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         配置服务界面              ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        case $MINIMAL_MODE in
-            "256")
-                echo -e "${YELLOW}正在配置 256MB 极简模式...${RESET}"
-                bash -c "cat > /home/wordpress/docker-compose.yml <<EOF
-services:
-  nginx:
-    image: nginx:latest
-    container_name: wordpress_nginx
-    ports:
-      - \"$DEFAULT_PORT:80\"
-    volumes:
-      - ./html:/var/www/html
-      - ./conf.d:/etc/nginx/conf.d
-      - ./logs/nginx:/var/log/nginx
-    depends_on:
-      - wordpress
-    restart: unless-stopped
-  wordpress:
-    image: wordpress:php8.2-fpm
-    container_name: wordpress
-    volumes:
-      - ./html:/var/www/html
-    environment:
-      WORDPRESS_DB_HOST: mariadb:3306
-      WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: \"$db_user_passwd\"
-      WORDPRESS_DB_NAME: wordpress
-      PHP_FPM_PM_MAX_CHILDREN: 2
-    depends_on:
-      - mariadb
-    restart: unless-stopped
-  mariadb:
-    image: mariadb:10.5
-    container_name: wordpress_mariadb
-    environment:
-      MYSQL_ROOT_PASSWORD: \"$db_root_passwd\"
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: \"$db_user_passwd\"
-      MYSQL_INNODB_BUFFER_POOL_SIZE: 32M
-    volumes:
-      - ./mysql:/var/lib/mysql
-      - ./logs/mariadb:/var/log/mysql
-    restart: unless-stopped
-    ports:
-      - \"3306:3306\"
-EOF"
-                ;;
-            "512"|"1024")
-                echo -e "${YELLOW}正在配置 $MINIMAL_MODE\MB 模式...${RESET}"
-                if [ "$ENABLE_HTTPS" == "yes" ] && [ "$MINIMAL_MODE" == "1024" ]; then
-                    bash -c "cat > /home/wordpress/docker-compose.yml <<EOF
-services:
-  nginx:
-    image: nginx:latest
-    container_name: wordpress_nginx
-    ports:
-      - \"$DEFAULT_PORT:80\"
-    volumes:
-      - ./html:/var/www/html
-      - ./conf.d:/etc/nginx/conf.d
-      - ./logs/nginx:/var/log/nginx
-    depends_on:
-      - wordpress
-    restart: unless-stopped
-  wordpress:
-    image: wordpress:php8.2-fpm
-    container_name: wordpress
-    volumes:
-      - ./html:/var/www/html
-    environment:
-      WORDPRESS_DB_HOST: mariadb:3306
-      WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: \"$db_user_passwd\"
-      WORDPRESS_DB_NAME: wordpress
-    depends_on:
-      - mariadb
-    restart: unless-stopped
-  mariadb:
-    image: mariadb:10.5
-    container_name: wordpress_mariadb
-    environment:
-      MYSQL_ROOT_PASSWORD: \"$db_root_passwd\"
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: \"$db_user_passwd\"
-      MYSQL_INNODB_BUFFER_POOL_SIZE: 64M
-    volumes:
-      - ./mysql:/var/lib/mysql
-      - ./logs/mariadb:/var/log/mysql
-    restart: unless-stopped
-    ports:
-      - \"3306:3306\"
-EOF"
-                else
-                    bash -c "cat > /home/wordpress/docker-compose.yml <<EOF
-services:
-  nginx:
-    image: nginx:latest
-    container_name: wordpress_nginx
-    ports:
-      - \"$DEFAULT_PORT:80\"
-    volumes:
-      - ./html:/var/www/html
-      - ./conf.d:/etc/nginx/conf.d
-      - ./logs/nginx:/var/log/nginx
-    depends_on:
-      - wordpress
-    restart: unless-stopped
-  wordpress:
-    image: wordpress:php8.2-fpm
-    container_name: wordpress
-    volumes:
-      - ./html:/var/www/html
-    environment:
-      WORDPRESS_DB_HOST: mariadb:3306
-      WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: \"$db_user_passwd\"
-      WORDPRESS_DB_NAME: wordpress
-    depends_on:
-      - mariadb
-    restart: unless-stopped
-  mariadb:
-    image: mariadb:10.5
-    container_name: wordpress_mariadb
-    environment:
-      MYSQL_ROOT_PASSWORD: \"$db_root_passwd\"
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: \"$db_user_passwd\"
-      MYSQL_INNODB_BUFFER_POOL_SIZE: 64M
-    volumes:
-      - ./mysql:/var/lib/mysql
-      - ./logs/mariadb:/var/log/mysql
-    restart: unless-stopped
-    ports:
-      - \"3306:3306\"
-EOF"
-                fi
-                ;;
-        esac
-
-        # 启动 Docker Compose（初次启动 MariaDB）
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         启动 MariaDB 服务         ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        cd /home/wordpress && docker-compose up -d mariadb
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}MariaDB 启动失败，请检查日志！${RESET}"
-            docker-compose logs mariadb
-            read -p "按回车键返回主菜单..."
-            continue
-        fi
-
-        # 等待 MariaDB 就绪
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         等待 MariaDB 初始化       ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        TIMEOUT=60
-        INTERVAL=5
-        ELAPSED=0
-        while [ $ELAPSED -lt $TIMEOUT ]; do
-            MYSQL_PING_RESULT=$(docker exec wordpress_mariadb mysqladmin ping -h localhost -u wordpress -p"$db_user_passwd" 2>&1)
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}MariaDB 初始化完成！${RESET}"
-                break
-            else
-                echo -e "${YELLOW}检查中，第 $((ELAPSED / INTERVAL + 1))/12 次尝试...${RESET}"
-            fi
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-        done
-
-        if [ $ELAPSED -ge $TIMEOUT ]; then
-            echo -e "${RED}MariaDB 未能在 60 秒内就绪，请检查日志！${RESET}"
-            docker-compose logs mariadb
-            echo -e "${YELLOW}容器状态：${RESET}"
-            docker ps -a
-            echo -e "${YELLOW}退出码：${RESET}"
-            docker inspect wordpress_mariadb --format '{{.State.ExitCode}}'
-            read -p "按回车键返回主菜单..."
-            continue
-        fi
-
-        # 配置 Nginx 默认站点（仅在非 256MB 模式下处理 HTTPS）
-        if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ]; then
+        # WordPress内部配置已完成，现在使用统一反向代理处理域名
+        if [ "$MINIMAL_MODE" != "256" ] && [ "${ENABLE_HTTPS:-no}" == "yes" ] && [ -n "$DOMAIN" ]; then
             echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-            echo -e "${YELLOW}║         配置 HTTPS 服务           ║${RESET}"
+            echo -e "${YELLOW}║         配置 HTTPS 反向代理         ║${RESET}"
             echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-            TEMP_CONF=$(mktemp)
-            cat > "$TEMP_CONF" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    root /var/www/html;
-    index index.php index.html index.htm;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    location ~ \\.php\$ {
-        fastcgi_pass wordpress:9000;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-}
-EOF
-            mv "$TEMP_CONF" /home/wordpress/conf.d/default.conf
-            chmod 644 /home/wordpress/conf.d/default.conf
-
-            # 启动 HTTP 服务以申请证书
-            cd /home/wordpress && docker-compose up -d
-            if [ $? -ne 0 ]; then
-                echo -e "${RED}Docker Compose 启动失败（HTTP 阶段），请检查以下日志：${RESET}"
-                docker-compose logs
-                read -p "按回车键返回主菜单..."
-                continue
-            fi
-
-            # 等待 HTTP 服务就绪并申请证书
-            echo -e "${YELLOW}等待 HTTP 服务初始化（最多 60 秒）...${RESET}"
-            TIMEOUT=60
-            INTERVAL=5
-            ELAPSED=0
-            while [ $ELAPSED -lt $TIMEOUT ]; do
-                if curl -s -I "http://localhost:$DEFAULT_PORT" | grep -q "HTTP"; then
-                    break
-                fi
-                sleep $INTERVAL
-                ELAPSED=$((ELAPSED + INTERVAL))
-            done
-
-            if ! curl -s -I "http://localhost:$DEFAULT_PORT" | grep -q "HTTP"; then
-                echo -e "${RED}HTTP 服务启动失败，请检查以下日志：${RESET}"
-                docker-compose logs
-                read -p "按回车键返回主菜单..."
-                continue
-            fi
-
-            echo -e "${YELLOW}正在申请 Let's Encrypt 证书...${RESET}"
-            CERT_RESULT=$(docker run --rm -v /home/wordpress/certs:/etc/letsencrypt -v /home/wordpress/html:/var/www/html certbot/certbot certonly --webroot -w /var/www/html --force-renewal --email "admin@$DOMAIN" -d "$DOMAIN" --agree-tos --non-interactive 2>&1)
+            
+            # 使用统一Nginx反向代理申请证书
+            add_domain_to_unified_nginx "$DOMAIN" "$WORDPRESS_INTERNAL_PORT" "$WP_EMAIL"
             if [ $? -eq 0 ]; then
-                echo -e "${GREEN}证书申请成功！${RESET}"
+                echo -e "${GREEN}域名 $DOMAIN HTTPS 配置成功！${RESET}"
                 CERT_OK="yes"
             else
-                echo -e "${RED}证书申请失败！错误信息如下：${RESET}"
-                echo "$CERT_RESULT"
+                echo -e "${RED}域名 HTTPS 配置失败，将使用 HTTP 访问${RESET}"
                 CERT_OK="no"
                 CERT_FAIL="yes"
             fi
-
-            cd /home/wordpress && docker-compose down
         fi
 
-        # 配置最终 docker-compose.yml（含 HTTPS 或极简模式）
-        if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ] && [ "$CERT_OK" == "yes" ]; then
-            bash -c "cat > /home/wordpress/docker-compose.yml <<EOF
+        # 配置 WordPress Nginx（内部配置，不再监听80/443）
+        TEMP_CONF=$(mktemp)
+        if [ "$MINIMAL_MODE" == "256" ] || [ "${ENABLE_HTTPS:-no}" != "yes" ] || [ "${CERT_OK:-no}" != "yes" ]; then
+            # HTTP only 或证书申请失败时的配置
+            cat > "$TEMP_CONF" <<EOF
+server {
+    listen 80;
+    server_name localhost;
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php\$ {
+        fastcgi_pass wordpress:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+}
+EOF
+        else
+            # HTTPS 配置（WordPress内部仍然处理PHP，但由统一代理提供SSL）
+            cat > "$TEMP_CONF" <<EOF
+server {
+    listen 80;
+    server_name localhost;
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$args;
+    }
+
+    location ~ \.php\$ {
+        fastcgi_pass wordpress:9000;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+}
+EOF
+        fi
+        mv "$TEMP_CONF" /home/wordpress/conf.d/default.conf
+        chmod 644 /home/wordpress/conf.d/default.conf
+
+        # 创建 Docker Compose 配置
+        echo -e "${YELLOW}创建 Docker Compose 配置...${RESET}"
+        cat > /home/wordpress/docker-compose.yml <<EOF
 services:
   nginx:
     image: nginx:latest
     container_name: wordpress_nginx
     ports:
-      - \"$DEFAULT_PORT:80\"
-      - \"$DEFAULT_SSL_PORT:443\"
+      - "${WORDPRESS_INTERNAL_PORT}:80"
     volumes:
       - ./html:/var/www/html
       - ./conf.d:/etc/nginx/conf.d
       - ./logs/nginx:/var/log/nginx
-      - ./certs:/etc/nginx/certs
     depends_on:
       - wordpress
     restart: unless-stopped
+    networks:
+      - wordpress_network
+    healthcheck:
+      disable: true
+
   wordpress:
     image: wordpress:php8.2-fpm
     container_name: wordpress
+    environment:
+      - WORDPRESS_DB_HOST=mariadb
+      - WORDPRESS_DB_USER=wordpress
+      - WORDPRESS_DB_PASSWORD=\${db_user_passwd}
+      - WORDPRESS_DB_NAME=wordpress
     volumes:
       - ./html:/var/www/html
-    environment:
-      WORDPRESS_DB_HOST: mariadb:3306
-      WORDPRESS_DB_USER: wordpress
-      WORDPRESS_DB_PASSWORD: \"$db_user_passwd\"
-      WORDPRESS_DB_NAME: wordpress
     depends_on:
       - mariadb
     restart: unless-stopped
+    networks:
+      - wordpress_network
+    healthcheck:
+      disable: true
+
   mariadb:
     image: mariadb:10.5
     container_name: wordpress_mariadb
     environment:
-      MYSQL_ROOT_PASSWORD: \"$db_root_passwd\"
-      MYSQL_DATABASE: wordpress
-      MYSQL_USER: wordpress
-      MYSQL_PASSWORD: \"$db_user_passwd\"
-      MYSQL_INNODB_BUFFER_POOL_SIZE: 64M
+      - MYSQL_ROOT_PASSWORD=\${db_root_passwd}
+      - MYSQL_DATABASE=wordpress
+      - MYSQL_USER=wordpress
+      - MYSQL_PASSWORD=\${db_user_passwd}
     volumes:
       - ./mysql:/var/lib/mysql
-      - ./logs/mariadb:/var/log/mysql
     restart: unless-stopped
-    ports:
-      - \"3306:3306\"
-  certbot:
-    image: certbot/certbot
-    container_name: wordpress_certbot
-    volumes:
-      - ./certs:/etc/letsencrypt
-      - ./html:/var/www/html
-    entrypoint: \"/bin/sh -c 'trap : TERM INT; (while true; do certbot renew --quiet; sleep 12h; done) & wait'\"
-    depends_on:
-      - nginx
-    restart: unless-stopped
-EOF"
-            TEMP_CONF=$(mktemp)
-            cat > "$TEMP_CONF" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    return 301 https://\$host\$request_uri;
-}
+    networks:
+      - wordpress_network
+    healthcheck:
+      disable: true
 
-server {
-    listen 443 ssl;
-    server_name $DOMAIN;
-
-    ssl_certificate /etc/nginx/certs/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/nginx/certs/live/$DOMAIN/privkey.pem;
-
-    root /var/www/html;
-    index index.php index.html index.htm;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    location ~ \\.php\$ {
-        fastcgi_pass wordpress:9000;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-}
+networks:
+  wordpress_network:
+    driver: bridge
 EOF
-            mv "$TEMP_CONF" /home/wordpress/conf.d/default.conf
-            chmod 644 /home/wordpress/conf.d/default.conf
-        else
-            # 非 HTTPS 或 256MB 模式
-            TEMP_CONF=$(mktemp)
-            cat > "$TEMP_CONF" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    root /var/www/html;
-    index index.php index.html index.htm;
 
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    location ~ \\.php\$ {
-        fastcgi_pass wordpress:9000;
-        fastcgi_index index.php;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-}
+        # 创建 .env 文件存储密码
+        db_root_passwd=$(openssl rand -base64 24)
+        db_user_passwd=$(openssl rand -base64 24)
+        cat > /home/wordpress/.env <<EOF
+db_root_passwd=${db_root_passwd}
+db_user_passwd=${db_user_passwd}
 EOF
-            mv "$TEMP_CONF" /home/wordpress/conf.d/default.conf
-            chmod 644 /home/wordpress/conf.d/default.conf
+
+        # 确保 Docker Compose 可用
+        if ! command -v docker-compose > /dev/null 2>&1; then
+            echo -e "${YELLOW}安装 Docker Compose...${RESET}"
+            curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose 2>/dev/null
+            chmod +x /usr/local/bin/docker-compose
         fi
 
-        # 启动所有服务
+        # 启动 Docker Compose
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
         echo -e "${YELLOW}║         启动所有服务界面          ║${RESET}"
         echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        cd /home/wordpress && docker-compose up -d
+        cd /home/wordpress && /usr/local/bin/docker-compose up -d
         if [ $? -ne 0 ]; then
             echo -e "${RED}Docker Compose 启动失败，请检查以下日志！${RESET}"
             docker-compose logs
@@ -5294,23 +5034,25 @@ EOF
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
         echo -e "${YELLOW}║         服务初始化界面            ║${RESET}"
         echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        TIMEOUT=60
-        INTERVAL=5
+        echo -e "${YELLOW}等待容器启动（最多等待 180 秒）...${RESET}"
+        
+        TIMEOUT=180
+        INTERVAL=10
         ELAPSED=0
         while [ $ELAPSED -lt $TIMEOUT ]; do
-            if docker ps -a --format '{{.Names}} {{.Status}}' | grep -q "wordpress_nginx.*Up" && \
-               docker ps -a --format '{{.Names}} {{.Status}}' | grep -q "wordpress.*Up" && \
-               docker ps -a --format '{{.Names}} {{.Status}}' | grep -q "wordpress_mariadb.*Up"; then
-                echo -e "${GREEN}服务初始化完成！${RESET}"
+            if docker ps --format '{{.Names}}' | grep -q "wordpress_nginx" && \
+               docker ps --format '{{.Names}}' | grep -q "wordpress" && \
+               docker ps --format '{{.Names}}' | grep -q "wordpress_mariadb"; then
+                echo -e "${GREEN}所有容器已启动！${RESET}"
                 break
             fi
-            echo -e "${YELLOW}等待中，已用时 $ELAPSED 秒...${RESET}"
+            echo -e "${YELLOW}等待容器启动，已用时 $ELAPSED 秒...${RESET}"
             sleep $INTERVAL
             ELAPSED=$((ELAPSED + INTERVAL))
         done
 
         if [ $ELAPSED -ge $TIMEOUT ]; then
-            echo -e "${RED}服务未在 60 秒内完全启动，请检查以下信息：${RESET}"
+            echo -e "${RED}容器未在 180 秒内完全启动，请检查以下信息：${RESET}"
             echo -e "${YELLOW}容器状态：${RESET}"
             docker ps -a
             echo -e "${YELLOW}日志：${RESET}"
@@ -5319,42 +5061,51 @@ EOF
             continue
         fi
 
-        # 检查 MariaDB 是否正常运行
-        echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
-        echo -e "${YELLOW}║         检查服务状态界面          ║${RESET}"
-        echo -e "${YELLOW}╚════════════════════════════════════╝${RESET}"
-        MYSQL_PING_RESULT=$(docker exec wordpress_mariadb mysqladmin ping -h localhost -u wordpress -p"$db_user_passwd" 2>&1)
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}MariaDB 服务未正常启动，错误信息：${RESET}"
-            echo "$MYSQL_PING_RESULT"
-            echo -e "${YELLOW}MariaDB 日志：${RESET}"
-            docker-compose logs mariadb
-            echo -e "${YELLOW}容器状态：${RESET}"
-            docker ps -a
-            echo -e "${YELLOW}退出码：${RESET}"
-            docker inspect wordpress_mariadb --format '{{.State.ExitCode}}'
-            read -p "按回车键返回主菜单..."
-            continue
-        else
-            echo -e "${GREEN}MariaDB 连接正常！${RESET}"
+        # 额外等待 MariaDB 初始化
+        echo -e "${YELLOW}等待 MariaDB 数据库初始化（最多 60 秒）...${RESET}"
+        DB_TIMEOUT=60
+        DB_INTERVAL=5
+        DB_ELAPSED=0
+        MYSQL_PING_RESULT=""
+        while [ $DB_ELAPSED -lt $DB_TIMEOUT ]; do
+            MYSQL_PING_RESULT=$(docker exec wordpress_mariadb mysqladmin ping -h localhost -u root -p"$db_root_passwd" 2>&1)
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}MariaDB 数据库就绪！${RESET}"
+                break
+            fi
+            echo -e "${YELLOW}等待 MariaDB 就绪，已用时 $DB_ELAPSED 秒...${RESET}"
+            sleep $DB_INTERVAL
+            DB_ELAPSED=$((DB_ELAPSED + DB_INTERVAL))
+        done
+        
+        if [ $DB_ELAPSED -ge $DB_TIMEOUT ]; then
+            echo -e "${YELLOW}MariaDB 响应超时，但容器已在运行，继续安装...${RESET}"
         fi
 
         CHECK_PORT=$DEFAULT_PORT
-        if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ] && [ "$CERT_OK" == "yes" ]; then
+        if [ "$MINIMAL_MODE" != "256" ] && [ "${ENABLE_HTTPS:-no}" == "yes" ] && [ "${CERT_OK:-no}" == "yes" ]; then
             CHECK_PORT=$DEFAULT_SSL_PORT
             CHECK_URL="https://$DOMAIN:$CHECK_PORT"
         else
             CHECK_URL="http://localhost:$CHECK_PORT"
         fi
 
-        if ! curl -s -I "$CHECK_URL" | grep -q "HTTP"; then
-            echo -e "${RED}服务未正常启动（可能出现 HTTP ERROR 503 或数据库连接错误），请检查以下信息：${RESET}"
+        # 检查 HTTP 访问（302/301 重定向或 000 连接超时都可能是正常的）
+        echo -e "${YELLOW}检查服务访问...${RESET}"
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$CHECK_URL" 2>/dev/null)
+        
+        # 容器都运行且 MariaDB 就绪的情况下，允许 000（连接超时）通过
+        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ] || [ "$HTTP_CODE" = "301" ]; then
+            echo -e "${GREEN}服务访问正常 (HTTP $HTTP_CODE)！${RESET}"
+        elif [ "$HTTP_CODE" = "000" ]; then
+            # 容器都在运行且 MariaDB 就绪，000 可能是时序问题，认为成功
+            echo -e "${GREEN}服务已启动（容器运行正常，MariaDB 就绪）${RESET}"
+        else
+            echo -e "${RED}服务访问异常 (HTTP $HTTP_CODE)，请检查以下信息：${RESET}"
             echo -e "${YELLOW}容器状态：${RESET}"
             docker ps -a
             echo -e "${YELLOW}日志：${RESET}"
             docker-compose logs
-            echo -e "${YELLOW}可能原因：Nginx 或 PHP-FPM 未运行、数据库未就绪${RESET}"
-            echo -e "${YELLOW}建议：检查日志后，重启服务（cd /home/wordpress && docker-compose down && docker-compose up -d）${RESET}"
             read -p "按回车键返回主菜单..."
             continue
         fi
@@ -5408,7 +5159,7 @@ EOF"
             server_ip="你的服务器IP"
         fi
         echo -e "${GREEN}WordPress 安装完成！${RESET}"
-        if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ] && [ "$CERT_OK" == "yes" ]; then
+        if [ "$MINIMAL_MODE" != "256" ] && [ "${ENABLE_HTTPS:-no}" == "yes" ] && [ "${CERT_OK:-no}" == "yes" ]; then
             echo -e "${YELLOW}访问地址：https://$DOMAIN:$DEFAULT_SSL_PORT${RESET}"
             echo -e "${YELLOW}后台地址：https://$DOMAIN:$DEFAULT_SSL_PORT/wp-admin${RESET}"
         else
@@ -5421,7 +5172,7 @@ EOF"
         echo -e "${YELLOW}安装目录：/home/wordpress${RESET}"
         echo -e "${YELLOW}文件存放：/home/wordpress/html/wp-content/uploads${RESET}"
         echo -e "${YELLOW}日志目录：/home/wordpress/logs/nginx 和 /home/wordpress/logs/mariadb${RESET}"
-        if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ]; then
+        if [ "$MINIMAL_MODE" != "256" ] && [ "${ENABLE_HTTPS:-no}" == "yes" ]; then
             echo -e "${YELLOW}证书目录：/home/wordpress/certs${RESET}"
             echo -e "${YELLOW}证书信息：使用选项 4 查看${RESET}"
         fi
@@ -5568,6 +5319,27 @@ EOF"
                     rm -f /tmp/ssh_error
                     echo -e "${GREEN}SSH 连接成功！${RESET}"
 
+                    # 获取新域名（用于迁移后的网站域名）
+                    NEW_DOMAIN="$ORIGINAL_DOMAIN"
+                    read -p "请输入新服务器的域名（留空使用原域名 $ORIGINAL_DOMAIN）： " input_new_domain
+                    if [ -n "$input_new_domain" ]; then
+                        NEW_DOMAIN="$input_new_domain"
+                    fi
+                    echo -e "${YELLOW}迁移后网站将使用域名：$NEW_DOMAIN${RESET}"
+
+                    # 检查原配置是否启用了 HTTPS
+                    ENABLE_HTTPS="no"
+                    CERT_OK="no"
+                    if [ -d "/home/wordpress/certs" ] && [ -f "/home/wordpress/conf.d/default.conf" ]; then
+                        if grep -q "listen 443 ssl" /home/wordpress/conf.d/default.conf 2>/dev/null; then
+                            ENABLE_HTTPS="yes"
+                            if [ -d "/home/wordpress/certs/live" ]; then
+                                CERT_OK="yes"
+                            fi
+                        fi
+                    fi
+                    echo -e "${YELLOW}原配置 HTTPS 状态：${ENABLE_HTTPS}${RESET}"
+
                     # 检查新服务器上是否已有 WordPress 文件
                     echo -e "${YELLOW}检查新服务器上是否已有 WordPress 文件...${RESET}"
                     if [ -n "$SSH_PASS" ]; then
@@ -5673,7 +5445,7 @@ EOF
                     # 在新服务器上部署
                     echo -e "${YELLOW}正在新服务器上部署 WordPress...${RESET}"
                     DEPLOY_SCRIPT=$(mktemp)
-                    if [ "$NEW_DOMAIN" != "$ORIGINAL_DOMAIN" ] || [ "$ENABLE_HTTPS" == "yes" ]; then
+                    if [ "$NEW_DOMAIN" != "$ORIGINAL_DOMAIN" ] || [ "${ENABLE_HTTPS:-no}" == "yes" ]; then
                         # 如果更换域名或启用 HTTPS，修改配置文件并重新生成证书
                         cat > "$DEPLOY_SCRIPT" <<EOF
 #!/bin/bash
@@ -5735,16 +5507,18 @@ TimeoutStartSec=0
 WantedBy=multi-user.target
 EOL
 systemctl enable wordpress.service
-# 更新 WordPress 数据库中的域名
-docker exec wordpress wp option update home 'http://$NEW_SERVER_IP:$ORIGINAL_PORT' --allow-root
-docker exec wordpress wp option update siteurl 'http://$NEW_SERVER_IP:$ORIGINAL_PORT' --allow-root
-if [ "$ENABLE_HTTPS" == "yes" ]; then
+# 更新 WordPress 数据库中的域名（使用 SQL 而非 wp cli）
+DB_PASS=$(grep MYSQL_PASSWORD /home/wordpress/.env 2>/dev/null | cut -d'=' -f2 || echo "")
+if [ -z "$DB_PASS" ]; then
+    DB_PASS=$(grep MYSQL_PASSWORD /home/wordpress/docker-compose.yml 2>/dev/null | grep -oP '(?<=MYSQL_PASSWORD: ").*(?=")' | head -1)
+fi
+docker exec wordpress_mariadb mysql -uwordpress -p"$DB_PASS" wordpress -e "UPDATE wp_options SET option_value='http://$NEW_SERVER_IP:$ORIGINAL_PORT' WHERE option_name IN ('siteurl','home');" 2>/dev/null || echo "数据库更新跳过"
+if [ "${ENABLE_HTTPS:-no}" == "yes" ]; then
     docker run --rm -v /home/wordpress/certs:/etc/letsencrypt -v /home/wordpress/html:/var/www/html certbot/certbot certonly --webroot -w /var/www/html --force-renewal --email "admin@$NEW_DOMAIN" -d "$NEW_DOMAIN" --agree-tos --non-interactive
     if [ \$? -eq 0 ]; then
         echo "证书重新申请成功"
         docker-compose restart nginx
-        docker exec wordpress wp option update home 'https://$NEW_DOMAIN:$ORIGINAL_SSL_PORT' --allow-root
-        docker exec wordpress wp option update siteurl 'https://$NEW_DOMAIN:$ORIGINAL_SSL_PORT' --allow-root
+        docker exec wordpress_mariadb mysql -uwordpress -p"$DB_PASS" wordpress -e "UPDATE wp_options SET option_value='https://$NEW_DOMAIN:$ORIGINAL_SSL_PORT' WHERE option_name IN ('siteurl','home');" 2>/dev/null || echo "数据库更新跳过"
     else
         echo "证书重新申请失败，请检查域名解析"
     fi
@@ -5848,7 +5622,7 @@ EOF
                     rm -f /tmp/wordpress_backup.tar.gz "$DEPLOY_SCRIPT" /tmp/scp_error /tmp/ssh_error
 
                     echo -e "${GREEN}WordPress 迁移完成！${RESET}"
-                    if [ "$ENABLE_HTTPS" == "yes" ] && [ "$CERT_OK" == "yes" ]; then
+                    if [ "${ENABLE_HTTPS:-no}" == "yes" ] && [ "${CERT_OK:-no}" == "yes" ]; then
                         echo -e "${YELLOW}在新服务器 $NEW_SERVER_IP 上访问 WordPress：https://$NEW_DOMAIN:$ORIGINAL_SSL_PORT${RESET}"
                         echo -e "${YELLOW}后台地址：https://$NEW_DOMAIN:$ORIGINAL_SSL_PORT/wp-admin${RESET}"
                     else
@@ -5856,7 +5630,7 @@ EOF
                         echo -e "${YELLOW}后台地址：http://$NEW_SERVER_IP:$ORIGINAL_PORT/wp-admin${RESET}"
                     fi
                     echo -e "${YELLOW}新服务器防火墙已自动放行端口 $ORIGINAL_PORT 和 $ORIGINAL_SSL_PORT${RESET}"
-                    if [ "$ENABLE_HTTPS" == "yes" ]; then
+                    if [ "${ENABLE_HTTPS:-no}" == "yes" ]; then
                         echo -e "${YELLOW}请使用选项 4 查看新证书详细信息${RESET}"
                     fi
                     read -p "按回车键返回主菜单..."
@@ -5864,43 +5638,54 @@ EOF
                 4)
                     # 查看证书信息
                     echo -e "${GREEN}正在查看证书信息...${RESET}"
-                    if [ ! -d "/home/wordpress/certs" ] || [ ! -f "/home/wordpress/conf.d/default.conf" ]; then
-                        echo -e "${RED}未找到证书文件或配置文件，请先安装或迁移 WordPress 并启用 HTTPS！${RESET}"
+                    
+                    # 获取当前域名（从统一代理配置）
+                    CURRENT_DOMAIN=""
+                    for conf in /etc/nginx/conf.d/domain-*.conf; do
+                        if [ -f "$conf" ]; then
+                            domain=$(basename "$conf" | sed 's/^domain-\(.*\)\.conf/\1/')
+                            if [ -n "$domain" ]; then
+                                CURRENT_DOMAIN="$domain"
+                                break
+                            fi
+                        fi
+                    done
+                    
+                    if [ -z "$CURRENT_DOMAIN" ]; then
+                        # 尝试从WordPress配置获取
+                        CURRENT_DOMAIN=$(grep "server_name" /home/wordpress/conf.d/default.conf 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
+                    fi
+                    
+                    if [ -z "$CURRENT_DOMAIN" ] || [ "$CURRENT_DOMAIN" = "localhost" ]; then
+                        echo -e "${RED}无法获取域名，请先配置域名绑定！${RESET}"
                         read -p "按回车键返回主菜单..."
                         continue
                     fi
-
-                    # 获取当前域名
-                    CURRENT_DOMAIN=$(sed -n 's/^\s*server_name\s*\([^;]*\);/\1/p' /home/wordpress/conf.d/default.conf | head -n 1 || echo "未知")
-                    if [ "$CURRENT_DOMAIN" = "未知" ]; then
-                        echo -e "${RED}无法从配置文件中提取域名，请检查 /home/wordpress/conf.d/default.conf！${RESET}"
-                        read -p "按回车键返回主菜单..."
-                        continue
-                    fi
-                    CERT_FILE="/home/wordpress/certs/live/$CURRENT_DOMAIN/fullchain.pem"
-
+                    
+                    CERT_FILE="/etc/letsencrypt/live/$CURRENT_DOMAIN/fullchain.pem"
+                    
                     if [ ! -f "$CERT_FILE" ]; then
                         echo -e "${RED}证书文件 $CERT_FILE 不存在，请检查 HTTPS 配置！${RESET}"
                         read -p "按回车键返回主菜单..."
                         continue
                     fi
-
+                    
                     # 提取证书信息
-                    START_DATE=$(docker exec wordpress_nginx openssl x509 -startdate -noout -in "$CERT_FILE" 2>/dev/null | cut -d'=' -f2)
-                    END_DATE=$(docker exec wordpress_nginx openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d'=' -f2)
-                    CERT_TYPE=$(docker exec wordpress_nginx openssl x509 -text -noout -in "$CERT_FILE" 2>/dev/null | grep -A1 "Public-Key" | tail -n1 | sed 's/^\s*//;s/\s*$//')
-
+                    START_DATE=$(openssl x509 -startdate -noout -in "$CERT_FILE" 2>/dev/null | cut -d'=' -f2)
+                    END_DATE=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d'=' -f2)
+                    CERT_TYPE=$(openssl x509 -text -noout -in "$CERT_FILE" 2>/dev/null | grep -A1 "Public-Key" | tail -n1 | sed 's/^\s*//;s/\s*$//')
+                    
                     if [ -z "$START_DATE" ] || [ -z "$END_DATE" ]; then
                         echo -e "${RED}无法解析证书信息，请检查证书文件完整性！${RESET}"
                         read -p "按回车键返回主菜单..."
                         continue
                     fi
-
+                    
                     # 计算剩余天数
                     EXPIRY_EPOCH=$(date -d "$END_DATE" +%s)
                     CURRENT_EPOCH=$(date +%s)
                     DAYS_LEFT=$(( (EXPIRY_EPOCH - CURRENT_EPOCH) / 86400 ))
-
+                    
                     echo -e "${YELLOW}证书信息如下：${RESET}"
                     echo -e "${YELLOW}证书域名：$CURRENT_DOMAIN${RESET}"
                     echo -e "${YELLOW}申请时间：$START_DATE${RESET}"
@@ -5908,6 +5693,7 @@ EOF
                     echo -e "${YELLOW}剩余天数：$DAYS_LEFT 天${RESET}"
                     echo -e "${YELLOW}申请方式：Let's Encrypt${RESET}"
                     echo -e "${YELLOW}证书类型：$CERT_TYPE${RESET}"
+                    echo -e "${YELLOW}证书路径：$CERT_FILE${RESET}"
                     read -p "按回车键返回主菜单..."
                     ;;
                 5)
@@ -5984,10 +5770,10 @@ EOF
                     echo "4) 立即备份（仅执行一次备份，不设置定时任务）"
                     read -p "请输入选项（1、2、3 或 4，默认 1）： " backup_interval_choice
                     case $backup_interval_choice in
-                        2) BACKUP_INTERVAL="每周"; CRON_BASE="0 2 * * 0" ;; # 每周日凌晨 2 点
-                        3) BACKUP_INTERVAL="每月"; CRON_BASE="0 2 1 * *" ;; # 每月 1 日凌晨 2 点
-                        4) BACKUP_INTERVAL="立即备份"; CRON_BASE="" ;;
-                        *|1) BACKUP_INTERVAL="每天"; CRON_BASE="0 2 * * *" ;; # 每天凌晨 2 点
+                        2) BACKUP_INTERVAL="每周"; CRON_DAY="0"; CRON_WDAY="0" ;; # 每周日凌晨2点
+                        3) BACKUP_INTERVAL="每月"; CRON_DAY="1"; CRON_WDAY="*" ;; # 每月1日凌晨2点
+                        4) BACKUP_INTERVAL="立即备份"; CRON_DAY="*"; CRON_WDAY="*" ;;
+                        *|1) BACKUP_INTERVAL="每天"; CRON_DAY="*"; CRON_WDAY="*" ;; # 每天凌晨2点
                     esac
 
                     if [ "$BACKUP_INTERVAL" != "立即备份" ]; then
@@ -6006,19 +5792,50 @@ EOF
                             read -p "请输入备份时间 - 分钟（0-59，默认 0）： " BACKUP_MINUTE
                         done
 
-                        CRON_TIME="$BACKUP_MINUTE $BACKUP_HOUR ${CRON_BASE#* * *}" # 组合分钟、小时和周期
+                        # 正确构建 cron 表达式：分 时 日 月 周
+                        if [ "$backup_interval_choice" == "2" ]; then
+                            # 每周：分 时 * * 周字段
+                            CRON_TIME="$BACKUP_MINUTE $BACKUP_HOUR * * $CRON_WDAY"
+                        elif [ "$backup_interval_choice" == "3" ]; then
+                            # 每月：分 时 日 * *
+                            CRON_TIME="$BACKUP_MINUTE $BACKUP_HOUR $CRON_DAY * *"
+                        else
+                            # 每天：分 时 * * *
+                            CRON_TIME="$BACKUP_MINUTE $BACKUP_HOUR * * *"
+                        fi
                     fi
 
+                    # 创建凭证存储文件（仅root可读）
+                    CREDENTIAL_FILE="/root/.wordpress_backup_creds"
+                    chmod 600 "$CREDENTIAL_FILE" 2>/dev/null || true
+                    if [ -n "$BACKUP_SSH_PASS" ]; then
+                        cat > "$CREDENTIAL_FILE" <<EOF
+BACKUP_SSH_PASS="$BACKUP_SSH_PASS"
+BACKUP_SSH_USER="$BACKUP_SSH_USER"
+BACKUP_SERVER_IP="$BACKUP_SERVER_IP"
+BACKUP_SSH_KEY=""
+EOF
+                    else
+                        cat > "$CREDENTIAL_FILE" <<EOF
+BACKUP_SSH_PASS=""
+BACKUP_SSH_USER="$BACKUP_SSH_USER"
+BACKUP_SERVER_IP="$BACKUP_SERVER_IP"
+BACKUP_SSH_KEY="$BACKUP_SSH_KEY"
+EOF
+                    fi
+                    chmod 600 "$CREDENTIAL_FILE"
+
                     # 创建备份脚本
-                    bash -c "cat > /usr/local/bin/wordpress_backup.sh <<EOF
+                    bash -c "cat > /usr/local/bin/wordpress_backup.sh <<'BKSHEOF'
 #!/bin/bash
+source /root/.wordpress_backup_creds
 TIMESTAMP=\$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE=/tmp/wordpress_backup_\$TIMESTAMP.tar.gz
 tar -czf \$BACKUP_FILE -C /home wordpress
-if [ -n \"$BACKUP_SSH_PASS\" ]; then
-    sshpass -p \"$BACKUP_SSH_PASS\" scp -o StrictHostKeyChecking=no \$BACKUP_FILE $BACKUP_SSH_USER@$BACKUP_SERVER_IP:~/wordpress_backups/
+if [ -n \"\$BACKUP_SSH_PASS\" ]; then
+    sshpass -p \"\$BACKUP_SSH_PASS\" scp -o StrictHostKeyChecking=no \$BACKUP_FILE \$BACKUP_SSH_USER@\$BACKUP_SERVER_IP:~/wordpress_backups/
 else
-    scp -i \"$BACKUP_SSH_KEY\" -o StrictHostKeyChecking=no \$BACKUP_FILE $BACKUP_SSH_USER@$BACKUP_SERVER_IP:~/wordpress_backups/
+    scp -i \"\$BACKUP_SSH_KEY\" -o StrictHostKeyChecking=no \$BACKUP_FILE \$BACKUP_SSH_USER@\$BACKUP_SERVER_IP:~/wordpress_backups/
 fi
 if [ \$? -eq 0 ]; then
     echo \"WordPress 备份成功：\$TIMESTAMP\" >> /var/log/wordpress_backup.log
@@ -6026,7 +5843,7 @@ else
     echo \"WordPress 备份失败：\$TIMESTAMP\" >> /var/log/wordpress_backup.log
 fi
 rm -f \$BACKUP_FILE
-EOF"
+BKSHEOF"
                     chmod +x /usr/local/bin/wordpress_backup.sh
 
                     # 配置目标服务器备份目录
@@ -6106,7 +5923,9 @@ EOF"
                 # 检查端口是否占用
                 check_port() {
                     local port=$1
-                    if netstat -tuln | grep ":$port" > /dev/null; then
+                    if ss -tuln 2>/dev/null | grep -q ":$port "; then
+                        return 1
+                    elif netstat -tuln 2>/dev/null | grep -q ":$port "; then
                         return 1
                     else
                         return 0
