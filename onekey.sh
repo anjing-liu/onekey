@@ -51,10 +51,18 @@ install_wget() {
             echo -e "${RED}apt 更新失败，请检查网络！${RESET}"
             return 1
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         sudo apt install -y wget
         if [ $? -ne 0 ]; then
             echo -e "${RED}wget 安装失败，请手动检查！${RESET}"
             return 1
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     elif [ "$SYSTEM" == "centos" ]; then
         echo -e "${YELLOW}检测到 wget 缺失，正在安装...${RESET}"
@@ -63,12 +71,20 @@ install_wget() {
             echo -e "${RED}wget 安装失败，请手动检查！${RESET}"
             return 1
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     elif [ "$SYSTEM" == "fedora" ]; then
         echo -e "${YELLOW}检测到 wget 缺失，正在安装...${RESET}"
         sudo dnf install -y wget
         if [ $? -ne 0 ]; then
             echo -e "${RED}wget 安装失败，请手动检查！${RESET}"
             return 1
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     else
         echo -e "${RED}无法识别系统，无法安装 wget。${RESET}"
@@ -95,17 +111,29 @@ update_system() {
         if [ $? -ne 0 ]; then
             return 1
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     elif [ "$SYSTEM" == "centos" ]; then
         echo -e "${GREEN}正在更新 CentOS 系统...${RESET}"
         sudo yum update -y && sudo yum clean all
         if [ $? -ne 0 ]; then
             return 1
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     elif [ "$SYSTEM" == "fedora" ]; then
         echo -e "${GREEN}正在更新 Fedora 系统...${RESET}"
         sudo dnf update -y && sudo dnf clean all
         if [ $? -ne 0 ]; then
             return 1
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     else
         echo -e "${RED}无法识别您的操作系统，跳过更新步骤。${RESET}"
@@ -741,6 +769,10 @@ dd_generate_random_password() {
         else
             echo -e "${YELLOW}已取消${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     fi
     
     return 0
@@ -766,11 +798,19 @@ dd_reinstall_menu() {
             echo ""
             break
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le 37 ]; then
             dd_execute_install "$choice"
         else
             echo -e "${RED}无效选项，请输入 1-37 之间的数字或直接回车返回${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
         
         dd_wait_for_enter
@@ -838,6 +878,10 @@ fb_fix_dpkg() {
             fb_info "发现 dpkg 中断，正在修复..."
             dpkg --configure -a
             if ! dpkg --audit >/dev/null 2>&1; then apt --fix-broken install -y; fi
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     fi
 }
@@ -929,6 +973,10 @@ fb_start_filebrowser() {
             fb_info "初始管理员密码: $password"
             echo "$password" > $FB_DATA_DIR/admin_password.txt
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     else
         fb_error "FileBrowser 容器启动失败，请检查日志: docker logs $FB_CONTAINER_NAME"
     fi
@@ -941,6 +989,10 @@ fb_configure_nginx_http() {
         if fb_has_systemctl && systemctl is-active --quiet nginx; then
             fb_info "停止 Nginx 以释放 80 端口..."
             systemctl stop nginx; sleep 2
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
         if ! fb_check_port 80; then fb_error "无法释放 80 端口"; fi
     fi
@@ -1036,6 +1088,10 @@ fb_auto_cert_helper() {
             systemctl start nginx
             if systemctl is-active --quiet nginx; then fb_info "Nginx 已恢复"; else fb_warn "Nginx 启动失败"; fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     fi
     if [ $ret -eq 0 ]; then fb_info "命令执行成功！"; else fb_warn "命令执行失败"; fi
 }
@@ -1103,6 +1159,10 @@ fb_uninstall_full() {
         read -p "再次确认删除所有上传的文件？(y/N): " confirm2
         if [[ "$confirm2" == "y" || "$confirm2" == "Y" ]]; then
             fb_info "删除上传的文件..." && rm -rf "$FB_SHARE_DIR"/* && rm -rf "$FB_SHARE_DIR"/.[!.]* 2>/dev/null || true
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     fi
     fb_info "停止并删除 FileBrowser 容器..." && docker stop $FB_CONTAINER_NAME 2>/dev/null || true && docker rm $FB_CONTAINER_NAME 2>/dev/null || true
@@ -1241,6 +1301,10 @@ show_menu() {
             echo -e "${GREEN}服务器推荐：https://my.frantech.ca/aff.php?aff=4337${RESET}"
             echo -e "${GREEN}VPS评测官方网站：https://www.1373737.xyz/${RESET}"
             exit 0
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         case $option in
@@ -2255,12 +2319,20 @@ EOF
         else
             echo -e "${YELLOW}未找到 cron 服务，跳过重启。${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     else
         # 使用 service 命令重启 cron
         if service --status-all | grep -q cron; then
             sudo service cron restart
         else
             echo -e "${YELLOW}未找到 cron 服务，跳过重启。${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     fi
     
@@ -2823,6 +2895,10 @@ EOF
             }
             proxy_management
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         read -p "按回车键返回主菜单..."
         ;;
             17)
@@ -2899,6 +2975,10 @@ while true; do
         if ! command -v docker &> /dev/null && ! snap list | grep -q docker; then
             echo -e "${RED}Docker 未安装，请先安装！${RESET}"
             return 1
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
         return 0
     }
@@ -2977,6 +3057,10 @@ uninstall_docker() {
         else
             echo -e "${YELLOW}已跳过停止并删除容器。${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     fi
 
     # 删除镜像确认
@@ -3050,6 +3134,10 @@ uninstall_docker() {
             fi
         else
             echo -e "${YELLOW}未配置镜像加速，默认使用 Docker 官方镜像源。${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         echo -e "${GREEN}请选择操作：${RESET}"
@@ -3128,6 +3216,10 @@ EOF
             echo -e "${YELLOW}没有已停止的容器！${RESET}"
             return
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         docker ps -a --filter "status=exited" --format "table {{.ID}}\t{{.Image}}\t{{.Names}}" | sed 's/CONTAINER ID/容器ID/; s/IMAGE/镜像名称/; s/NAMES/容器名称/'
         read -p "请输入要启动的容器ID： " container_id
         if docker start "$container_id" &> /dev/null; then
@@ -3146,6 +3238,10 @@ EOF
         else
             echo -e "${RED}容器启动失败！${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     }
 
     # 停止 Docker 容器
@@ -3159,6 +3255,10 @@ EOF
             echo -e "${GREEN}容器已停止！${RESET}"
         else
             echo -e "${RED}容器停止失败！${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     }
 
@@ -3183,6 +3283,10 @@ EOF
         else
             echo -e "${RED}容器删除失败！${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     }
 
     # 删除 Docker 镜像
@@ -3199,11 +3303,19 @@ EOF
             docker stop $running_containers 2>/dev/null
             docker rm $running_containers 2>/dev/null
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         # 删除镜像
         if docker rmi "$image_id" &> /dev/null; then
             echo -e "${GREEN}镜像删除成功！${RESET}"
         else
             echo -e "${RED}镜像删除失败！${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     }
 
@@ -3274,6 +3386,10 @@ EOF
         else
             echo -e "${RED}sun-panel 安装失败，请检查日志！${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     }
 
 # 选项10：拉取镜像并安装容器（增强版 - 支持手动拉取）
@@ -3285,6 +3401,10 @@ install_image_container() {
         read -p "请输入镜像名称（示例：nginx:latest 或 localhost:5000/nginx:v1）： " image_name
         if [[ -z "$image_name" ]]; then
             echo -e "${RED}镜像名称不能为空！${RESET}"
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
         break
@@ -3314,6 +3434,10 @@ install_image_container() {
         else
             echo -e "${YELLOW}取消手动拉取，返回主菜单...${RESET}"
             return
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     fi
 
@@ -3398,6 +3522,10 @@ install_image_container() {
                 fi
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     fi
 
     # 如果仍未检测到有效端口，提示用户从常见端口选择
@@ -3469,6 +3597,10 @@ install_image_container() {
             echo -e "${RED}目录创建失败，请检查权限或手动创建：sudo mkdir -p '$data_path'${RESET}"
             return
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     fi
 
     # 防火墙处理
@@ -3521,6 +3653,10 @@ install_image_container() {
             echo -e "${RED}容器启动后异常退出，请查看日志：${RESET}"
             docker logs "$container_name"
             return
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 验证端口监听
@@ -3578,6 +3714,10 @@ install_image_container() {
             echo -e "${RED}镜像名称不能为空！${RESET}"
             return
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 拉取最新镜像
         echo -e "${GREEN}正在更新镜像：${image_name}...${RESET}"
@@ -3585,12 +3725,20 @@ install_image_container() {
             echo -e "${RED}镜像更新失败！请检查：\n1. 镜像名称是否正确\n2. 网络连接是否正常${RESET}"
             return
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 查找关联容器
         container_ids=$(docker ps -a --filter "ancestor=$image_name" --format "{{.ID}}")
         if [ -z "$container_ids" ]; then
             echo -e "${YELLOW}没有找到使用该镜像的容器${RESET}"
             return
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 重启容器
@@ -3668,6 +3816,10 @@ install_image_container() {
             done
             DEFAULT_PORT=$new_port
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 开放端口
         echo -e "${YELLOW}正在开放端口 $DEFAULT_PORT...${RESET}"
@@ -3686,12 +3838,20 @@ install_image_container() {
         else
             echo -e "${YELLOW}未检测到常见防火墙工具，请手动开放端口 $DEFAULT_PORT！${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 拉取 Portainer 镜像
         echo -e "${YELLOW}正在拉取 Portainer 镜像...${RESET}"
         if ! docker pull 6053537/portainer-ce; then
             echo -e "${RED}拉取 Portainer 镜像失败！请检查：\n1. 网络连接是否正常\n2. Docker 是否正常运行${RESET}"
             return
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 检查是否已有同名容器
@@ -3700,12 +3860,20 @@ install_image_container() {
             docker stop portainer &> /dev/null
             docker rm portainer &> /dev/null
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 运行 Portainer 容器
         echo -e "${YELLOW}正在启动 Portainer 容器...${RESET}"
         if ! docker run -d --restart=always --name="portainer" -p $DEFAULT_PORT:9000 -v /var/run/docker.sock:/var/run/docker.sock 6053537/portainer-ce; then
             echo -e "${RED}启动 Portainer 容器失败！请检查 Docker 日志：docker logs portainer${RESET}"
             return
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 检查容器状态
@@ -3720,6 +3888,10 @@ install_image_container() {
         else
             echo -e "${RED}Portainer 容器未正常运行，请检查以下日志：${RESET}"
             docker logs portainer
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
     }
     
@@ -4063,6 +4235,10 @@ EOF"
         else
             return 0
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
     }
 
     # 检查防火墙并尝试关闭
@@ -4081,6 +4257,10 @@ EOF"
                 fi
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         if command -v firewall-cmd > /dev/null 2>&1; then
             firewall-cmd --state | grep -q "running"
             if [ $? -eq 0 ]; then
@@ -4094,6 +4274,10 @@ EOF"
                 fi
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         if command -v iptables > /dev/null 2>&1; then
             iptables -C INPUT -p tcp --dport "$port" -j DROP 2>/dev/null || iptables -C INPUT -p tcp --dport "$port" -j REJECT 2>/dev/null
             if [ $? -eq 0 ]; then
@@ -4104,6 +4288,10 @@ EOF"
                 sudo iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
                 echo -e "${GREEN}iptables 规则已清除${RESET}"
             fi
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
         return $firewall_blocking
     }
@@ -4612,6 +4800,10 @@ case $operation_choice in
                 mkdir -p /home/wordpress/html /home/wordpress/mysql /home/wordpress/conf.d /home/wordpress/logs/nginx /home/wordpress/logs/mariadb /home/wordpress/certs
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 检查端口占用并选择可用端口
         DEFAULT_PORT=80
@@ -4658,6 +4850,10 @@ case $operation_choice in
                 continue
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 检查并放行防火墙端口
         if [ "$SYSTEM" == "centos" ] && command -v firewall-cmd > /dev/null 2>&1; then
@@ -4690,12 +4886,20 @@ case $operation_choice in
                 iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 再次验证端口
         check_port "$DEFAULT_PORT"
         if [ $? -eq 0 ]; then
             echo -e "${RED}防火墙放行后端口 $DEFAULT_PORT 仍被占用，请检查其他服务或防火墙配置！${RESET}"
             read -p "按回车键返回主菜单..."
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
 
@@ -4759,6 +4963,10 @@ case $operation_choice in
                     fi
                 fi
             fi
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 询问 MariaDB 用户信息
@@ -4860,10 +5068,18 @@ case $operation_choice in
             echo -e "${YELLOW}内存占用最高的进程：${RESET}"
             ps aux --sort=-%mem | head -n 5
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         if [ "${FREE_DISK%G}" -lt 1 ]; then
             echo -e "${RED}错误：可用磁盘空间不足 1GB，MariaDB 可能无法运行！请释放空间后重试。${RESET}"
             read -p "按回车键返回主菜单..."
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
 
@@ -4880,6 +5096,10 @@ case $operation_choice in
         else
             echo -e "${GREEN}Docker Compose 已安装，跳过此步骤。${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 创建目录和配置 docker-compose.yml
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
@@ -4889,6 +5109,10 @@ case $operation_choice in
         if [ $? -ne 0 ]; then
             echo -e "${RED}创建目录 /home/wordpress 失败，请检查权限或磁盘空间！${RESET}"
             read -p "按回车键返回主菜单..."
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
         touch wordpress/docker-compose.yml
@@ -5051,6 +5275,10 @@ EOF"
             read -p "按回车键返回主菜单..."
             continue
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 等待 MariaDB 就绪
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
@@ -5079,6 +5307,10 @@ EOF"
             echo -e "${YELLOW}退出码：${RESET}"
             docker inspect wordpress_mariadb --format '{{.State.ExitCode}}'
             read -p "按回车键返回主菜单..."
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
 
@@ -5152,6 +5384,10 @@ EOF
             fi
 
             cd /home/wordpress && docker-compose down
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 配置最终 docker-compose.yml（含 HTTPS 或极简模式）
@@ -5268,6 +5504,10 @@ EOF
             mv "$TEMP_CONF" /home/wordpress/conf.d/default.conf
             chmod 644 /home/wordpress/conf.d/default.conf
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 启动所有服务
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
@@ -5279,6 +5519,10 @@ EOF
             docker-compose logs
             echo -e "${YELLOW}可能原因：镜像拉取失败、端口冲突或服务依赖问题${RESET}"
             read -p "按回车键返回主菜单..."
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
         echo -e "${GREEN}所有服务启动成功！${RESET}"
@@ -5311,6 +5555,10 @@ EOF
             read -p "按回车键返回主菜单..."
             continue
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 检查 MariaDB 是否正常运行
         echo -e "${YELLOW}╔════════════════════════════════════╗${RESET}"
@@ -5331,6 +5579,10 @@ EOF
         else
             echo -e "${GREEN}MariaDB 连接正常！${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         CHECK_PORT=$DEFAULT_PORT
         if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ] && [ "$CERT_OK" == "yes" ]; then
@@ -5338,6 +5590,10 @@ EOF
             CHECK_URL="https://$DOMAIN:$CHECK_PORT"
         else
             CHECK_URL="http://localhost:$CHECK_PORT"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         if ! curl -s -I "$CHECK_URL" | grep -q "HTTP"; then
@@ -5349,6 +5605,10 @@ EOF
             echo -e "${YELLOW}可能原因：Nginx 或 PHP-FPM 未运行、数据库未就绪${RESET}"
             echo -e "${YELLOW}建议：检查日志后，重启服务（cd /home/wordpress && docker-compose down && docker-compose up -d）${RESET}"
             read -p "按回车键返回主菜单..."
+            continue
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
             continue
         fi
 
@@ -5379,6 +5639,10 @@ EOF"
         else
             echo -e "${RED}配置 WordPress 服务失败，请手动检查！${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 禁用交换空间（可选，仅在 1GB 模式下）
         if [ "$MINIMAL_MODE" == "1024" ]; then
@@ -5391,6 +5655,10 @@ EOF"
                 echo -e "${GREEN}交换空间已禁用并删除！${RESET}"
             fi
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
 
         # 显示安装完成界面
         echo -e "${GREEN}╔════════════════════════════════════╗${RESET}"
@@ -5400,6 +5668,10 @@ EOF"
         if [ -z "$server_ip" ]; then
             server_ip="你的服务器IP"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         echo -e "${GREEN}WordPress 安装完成！${RESET}"
         if [ "$MINIMAL_MODE" != "256" ] && [ "$ENABLE_HTTPS" == "yes" ] && [ "$CERT_OK" == "yes" ]; then
             echo -e "${YELLOW}访问地址：https://$DOMAIN:$DEFAULT_SSL_PORT${RESET}"
@@ -5407,6 +5679,10 @@ EOF"
         else
             echo -e "${YELLOW}访问地址：http://$server_ip:$DEFAULT_PORT${RESET}"
             echo -e "${YELLOW}后台地址：http://$server_ip:$DEFAULT_PORT/wp-admin${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
         echo -e "${YELLOW}数据库用户：wordpress${RESET}"
         echo -e "${YELLOW}数据库密码：$db_user_passwd${RESET}"
@@ -5418,8 +5694,16 @@ EOF"
             echo -e "${YELLOW}证书目录：/home/wordpress/certs${RESET}"
             echo -e "${YELLOW}证书信息：使用选项 4 查看${RESET}"
         fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
+        fi
         if [ "$MINIMAL_MODE" == "256" ]; then
             echo -e "${YELLOW}注意：当前为 256MB 极简模式，性能较低，仅适合测试用途！${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
 
         # 询问是否配置定时备份
@@ -5428,6 +5712,10 @@ EOF"
         if [ "$enable_backup" == "y" ] || [ "$enable_backup" == "Y" ]; then
             operation_choice=5
             echo -e "${YELLOW}即将跳转到定时备份配置（选项 5）...${RESET}"
+        fi
+n        # 快捷键 s 返回主菜单
+        if [ "$option" = "s" ]; then
+            continue
         fi
         read -p "按回车键返回主菜单..."
         ;;
