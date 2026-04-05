@@ -1,5 +1,12 @@
 #!/bin/bash
-
+# 设置快捷命令 s
+if [ ! -f /usr/local/bin/s ] || [ "$(readlink /usr/local/bin/s 2>/dev/null)" != "/root/onekey.sh" ]; then
+    ln -sf /root/onekey.sh /usr/local/bin/s 2>/dev/null
+    chmod +x /root/onekey.sh 2>/dev/null
+fi
+if ! grep -q "alias s=" /root/.bashrc 2>/dev/null; then
+    echo "alias s='/root/onekey.sh'" >> /root/.bashrc
+fi
 # 设置颜色
 GREEN="\033[32m"
 RED="\033[31m"
