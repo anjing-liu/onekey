@@ -6041,27 +6041,22 @@ BKSHEOF"
                 fi
                 sysctl net.ipv4.tcp_congestion_control
                 echo -e "${YELLOW}正在下载并运行 3X-UI 安装脚本...${RESET}"
-                printf "y\nsinian\nsinian\n5321\na\n" | bash <(curl -Ls https://raw.githubusercontent.com/anjing-liu/3x-ui/master/install.sh) > /tmp/3x-ui-install.log 2>&1
-                X_UI_RESULT=$?
-                if [ $X_UI_RESULT -eq 0 ] || grep -q "设置成功" /tmp/3x-ui-install.log 2>/dev/null; then
-                    echo ""
-                    echo -e "${GREEN}╔══════════════════════════════════════════╗${RESET}"
-                    echo -e "${GREEN}║         3X-UI 安装完成！            ║${RESET}"
-                    echo -e "${GREEN}╚══════════════════════════════════════════╝${RESET}"
-                    SERVER_IP=$(curl -s4 ifconfig.me 2>/dev/null || curl -s4 api.ipify.org 2>/dev/null || curl -s4 ip.sb 2>/dev/null || echo "服务器IP")
-                    echo ""
-                    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-                    echo -e "${YELLOW}  3X-UI 面板登录信息${RESET}"
-                    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-                    echo -e "${YELLOW}  访问地址: http://${SERVER_IP}:5321/a/${RESET}"
-                    echo -e "${YELLOW}  用户名:   sinian${RESET}"
-                    echo -e "${YELLOW}  密码:     sinian${RESET}"
-                    echo -e "${YELLOW}  端口:     5321${RESET}"
-                    echo -e "${YELLOW}  登录路径: /a/${RESET}"
-                    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-                else
-                    echo -e "${RED}3X-UI 安装失败，请检查网络或脚本输出！${RESET}"
-                fi
+                printf "y\nsinian\nsinian\n5321\na\n" | bash <(curl -Ls https://raw.githubusercontent.com/anjing-liu/3x-ui/master/install.sh)
+                echo ""
+                echo -e "${GREEN}╔══════════════════════════════════════════╗${RESET}"
+                echo -e "${GREEN}║         3X-UI 安装完成！            ║${RESET}"
+                echo -e "${GREEN}╚══════════════════════════════════════════╝${RESET}"
+                SERVER_IP=$(curl -s4 ifconfig.me 2>/dev/null || curl -s4 api.ipify.org 2>/dev/null || curl -s4 ip.sb 2>/dev/null || echo "服务器IP")
+                echo ""
+                echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+                echo -e "${YELLOW}  3X-UI 面板登录信息${RESET}"
+                echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+                echo -e "${YELLOW}  访问地址: http://${SERVER_IP}:5321/a/${RESET}"
+                echo -e "${YELLOW}  用户名:   sinian${RESET}"
+                echo -e "${YELLOW}  密码:     sinian${RESET}"
+                echo -e "${YELLOW}  端口:     5321${RESET}"
+                echo -e "${YELLOW}  登录路径: /a/${RESET}"
+                echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
                 read -p "按回车键返回主菜单..."
                 ;;
                 24)
