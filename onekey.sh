@@ -900,7 +900,8 @@ fb_check_port() {
 }
 
 fb_auto_select_port() {
-    local start_port=$1 port=$start_port
+    local start_port=$1
+    local port=$start_port
     while ! fb_check_port $port; do
         fb_warn "端口 $port 已被占用，自动选择新端口..."
         port=$((port + 1))
