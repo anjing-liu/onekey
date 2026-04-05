@@ -6041,8 +6041,8 @@ BKSHEOF"
                 fi
                 sysctl net.ipv4.tcp_congestion_control
                 echo -e "${YELLOW}正在下载并运行 3X-UI 安装脚本...${RESET}"
-                printf "y\nsinian\nsinian\n5321\na\n" | bash <(curl -Ls https://raw.githubusercontent.com/anjing-liu/3x-ui/master/install.sh) 2>&1 | grep -E "(Username and password|设置成功|port:|正在初始化)" | head -20
-                X_UI_RESULT=${PIPESTATUS[0]}
+                printf "y\nsinian\nsinian\n5321\na\n" | bash <(curl -Ls https://raw.githubusercontent.com/anjing-liu/3x-ui/master/install.sh) > /tmp/3x-ui-install.log 2>&1
+                X_UI_RESULT=$?
                 if [ $X_UI_RESULT -eq 0 ] || grep -q "设置成功" /tmp/3x-ui-install.log 2>/dev/null; then
                     echo ""
                     echo -e "${GREEN}╔══════════════════════════════════════════╗${RESET}"
